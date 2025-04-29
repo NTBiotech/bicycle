@@ -16,7 +16,8 @@ def get_full_name(
 def get_custom_name(*args):
     """
     Function that converts all input variables into one string with values and one string with names.
-    Format: "valueofv1_valueofv2_..._valueofvx"
+    Format: "valueofv1_valueofv2_..._valueofvx". 
+    Only works for variables that are registered in globals().
 
     """
     value_string = ""
@@ -28,3 +29,18 @@ def get_custom_name(*args):
 
 
     return value_string[:-1], key_string[:-1]
+
+from pathlib import Path
+def get_id(dir_path: Path, id_length: int = 5, prefix: str = ""):
+    """Generates a the next in dir_path not existing directory name id of length n out of ints. """
+    
+    id = None
+    existing_ids = [d.name for d in dir_path.iterdir() if d.is_dir()]
+    n = 0
+    while id == None:
+        id = prefix + f"0"*(5-len(str(n)))+ str(n)
+        if id in existing_ids:
+            id  = None
+            n+=1
+    
+    return id

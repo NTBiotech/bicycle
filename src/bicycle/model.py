@@ -316,6 +316,8 @@ class BICYCLE(pl.LightningModule):
             sigma_min: float
                 Minimum value of sigma in the Ornstein-Uhlenbeck process, that is used to model
                 gene expression.
+            T: float
+            learn_T: bool
             train_only_likelihood: bool
                 If True, only NLL loss is used to train the model.
             train_only_latents: bool

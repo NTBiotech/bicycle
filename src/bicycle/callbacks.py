@@ -10,6 +10,13 @@ from bicycle.utils.plotting import plot_training_results
 
 
 class MyLoggerCallback(pl.Callback):
+    """
+    Class to log after training of the bicycle model.
+
+    Automatically logs the trainer.logger.history in a "logger.parquet" file.
+    Also dumps training stats into "report.yaml" file.
+    This class subsets the pytorch Lightning Callback class.
+    """
     def __init__(self, dirpath: str, **kwargs) -> None:
         super().__init__(**kwargs)
         self.dirpath = dirpath
