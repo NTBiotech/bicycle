@@ -161,4 +161,6 @@ cython_debug/
 
 **/*.ckpt
 **/*.png
+
+notebooks/experiments/bottleneck/data/*
 notebooks/experiments/bottleneck/sandbox.ipynb
