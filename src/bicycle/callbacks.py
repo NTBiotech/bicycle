@@ -82,7 +82,7 @@ class GenerateCallback(pl.Callback):
     """
     def __init__(self, file_name_plot, plot_epoch_callback=10, true_beta=None, labels=None):
         """
-        Initializes the GenerateCallback function for plotting training results during training.
+        Initializes the GenerateCallback function for plotting training results after each training epoch.
 
         Args:
             file_name_plot (str): containing the file_name for the saved plots.

@@ -104,7 +104,7 @@ def create_data(
             print("*" * 100)
 
     # Print sparsity level of adjacency matrix
-    if verbose:
+    if False: #if verbose: DEPRECATED! gt_dyn accessed before initialization
         print(f"Sparsity level of adjacency matrix: {(100*(beta != 0).sum() / (N * N)):.2f}%")
 
         fig, ax = plt.subplots(1, 2, figsize=(15, 7.5))
@@ -800,7 +800,7 @@ def create_loaders_norman(
     covariates=None,
     **kwargs,
 ):
-
+    """Deprecated!"""
     if len(test_regimes) > 0:
         # No intervention must be in train and test sim regimes:
         if len([x for x in train_regimes if x in test_regimes]) > 0:
