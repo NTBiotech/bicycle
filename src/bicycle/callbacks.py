@@ -52,7 +52,7 @@ class MyLoggerCallback(pl.Callback):
 
 # Subclass _should_skip_saving_checkpoint
 class CustomModelCheckpoint(ModelCheckpoint):
-    """Custom ModelCheckpoint to save after n epochs."""
+    """Custom ModelCheckpoint to save after n epochs. Saves at the end of training."""
 
     def __init__(self, start_after: int = 1000, **kwargs):
         super().__init__(**kwargs)
