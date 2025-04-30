@@ -21,6 +21,9 @@ def plot_training_results(
 ):
     """
     Function for generating plots of training results for the bicycle model.
+    
+    Notes:
+    - file_name_plot must be a file_name not target directory.
     """
     fig, ax = plt.subplots(3, 2, figsize=(14, 16))
     df_plot = pd.DataFrame(trainer.logger.history).reset_index(drop=True)
