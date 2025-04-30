@@ -1055,7 +1055,9 @@ class BICYCLE(pl.LightningModule):
                 samples, sim_regime, sample_idx, data_category
         
         Returns:
-            loss: loss for training Bicycle
+            loss: loss for training Bicycle 
+            or
+            None if batch is empty
         
         """
         kwargs = {"on_step": False, "on_epoch": True}
