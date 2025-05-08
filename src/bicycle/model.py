@@ -911,6 +911,9 @@ class BICYCLE(pl.LightningModule):
 
     def training_step(self, batch, batch_idx):
         kwargs = {"on_step": False, "on_epoch": True}
+        # check for multiple gpu usage
+        if self.trainer.strategy != "auto":
+            kwargs["sync_dist"] = True
         prefix = "train" if self.training else "valid"
 
         samples, sim_regime, sample_idx, data_category = batch
