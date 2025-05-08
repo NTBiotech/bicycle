@@ -15,7 +15,8 @@ import numpy as np
 import pandas as pd
 import torch
 import pytorch_lightning as pl
-from pytorch_lightning.callbacks import RichProgressBar, StochasticWeightAveraging
+from pytorch_lightning.callbacks import RichProgressBar, StochasticWeightAveraging, DeviceStatsMonitor
+from pytorch_lightning.profilers import AdvancedProfiler
 
 from bicycle.model import BICYCLE
 from bicycle.utils.data import create_data, create_loaders, get_diagonal_mask
@@ -27,9 +28,44 @@ from bicycle.callbacks import (
     GenerateCallback,
     MyLoggerCallback,
 )
+import argparse
+
+# arguments: 
+argparser = argparse.ArgumentParser()
+argparser.add_argument("--seed", type=int, help="Random seed for reproducibility")
+argparser.add_argument("--scale_factor", type=float, help="Scaling factor for parameters")
+argparser.add_argument("--GPU", type=int, help="GPU device ID to use")
+argparser.add_argument("--monitor_stats", type=bool)
+argparser.add_argument("--checkpointing", type=bool)
+argparser.add_argument("--progressbar_rate", type=int)
+
+args = argparser.parse_args()
 
 SEED = 1
-GPU_DEVICE = 1
+scale_factor = 1
+GPU_DEVICES = [1]
+monitor_stats = False
+CHECKPOINTING = False
+progressbar_rate = 0
+
+
+if args.seed:
+    SEED = args.seed
+
+if args.scale_factor:
+    scale_factor = args.scale_factor
+
+if args.GPU:
+    GPU_DEVICES = [args.GPU]
+
+if args.monitor_stats:
+    monitor_stats = args.monitor_stats
+
+if args.checkpointing:
+    CHECKPOINTING = args.checkpointing
+
+if args.progressbar_rate:
+    progressbar_rate=args.progressbar_rate
 
 pl.seed_everything(SEED)
 torch.set_float32_matmul_precision("high")
@@ -37,17 +73,13 @@ torch.set_float32_matmul_precision("high")
 """
 commonly used parameters:
 n_genes
-intervention_type
-SEED
 n_samples_control
 n_samples_per_perturbation
 batch_size
 n_epochs
 n_epochs_pretrain_latents
-mask
-validation_size
+are default divided by 'scale_factor'
 """
-
 
 # configure output paths
 ## subdirectories model and plots
@@ -75,9 +107,9 @@ print(f"Output paths are: {str(MODELS_PATH)} and {str(PLOTS_PATH)}!")
 # create synthetic data
 ## parameters for data creation with prefix data
 print("Setting data creation parameters...")
-data_n_genes = 4 # needs to be a round number
-data_n_samples_control = 50
-data_n_samples_per_perturbation = 26
+data_n_genes = int(10//scale_factor + 10//scale_factor % 2) # needs to be a round number
+data_n_samples_control = int(500//scale_factor + 500//scale_factor % 2)
+data_n_samples_per_perturbation = int(250//scale_factor + 250//scale_factor % 2)
 data_make_counts=True
 data_train_gene_ko=list(np.arange(0, data_n_genes, 1).astype(str))
 data_test_gene_ko = []
@@ -91,7 +123,7 @@ data_edge_assignment="random-uniform"
 data_sem="linear-ou"
 data_make_contractive=True
 data_verbose=False
-data_device=torch.device(f"cpu")
+data_device=torch.device("cpu")
 data_intervention_type="Cas9"
 data_T=1.0
 data_library_size_range=[10 * data_n_genes, 100 * data_n_genes]
@@ -135,7 +167,7 @@ np.save(os.path.join(MODELS_PATH.joinpath("synthetic_data"), "check_sim_gt_inter
 # initialize data loaders
 print("Initializing Dataloaders...")
 validation_size = 0.2
-batch_size = 10
+batch_size = int(10000//scale_factor + 10000//scale_factor % 2)
 
 train_loader, validation_loader, test_loader = create_loaders(samples=samples,
                           sim_regime=sim_regime,
@@ -146,6 +178,8 @@ train_loader, validation_loader, test_loader = create_loaders(samples=samples,
                           test_gene_ko=data_test_gene_ko,
                           persistent_workers=False,
                           covariates=None,
+                          num_workers= batch_size if batch_size < 64 else 64
+
 )
 
 # initialize parameters for the bicycle class with prefix model
@@ -160,7 +194,7 @@ model_rank_w_cov_factor = model_n_genes
 model_optimizer = "adam"
 # Faster decay for estimates of gradient and gradient squared:
 model_optimizer_kwargs = {"betas": [0.5, 0.9]}
-model_device = torch.device(f"cuda:{GPU_DEVICE}")
+model_device = torch.device(f"cuda:{GPU_DEVICES[0]}")
 model_scale_l1 = 0.1
 model_scale_spectral = 1.0
 model_scale_lyapunov = 1.0
@@ -232,7 +266,7 @@ model.to(model_device)
 
 
 # training variables
-n_epochs = 5100
+n_epochs = int(51000//scale_factor + 51000//scale_factor % 2)
 gradient_clip_val = 1.0
 plot_epoch_callback = 500 # intervall for plot_training_results -> GenerateCallback
 
@@ -243,14 +277,13 @@ if validation_size > 0:
 
 # callback variables
 swa = 250
-CHECKPOINTING = True
 VERBOSE_CHECKPOINTING = False
-SAVE_PLOT = True
-OVERWRITE = True
 check_val_every_n_epoch = 1
 log_every_n_steps = 1
 
-
+# initialize profiler to find bottlenecks
+MODELS_PATH.joinpath("profiler").mkdir(parents=True, exist_ok=True)
+profiler = AdvancedProfiler(dirpath=MODELS_PATH.joinpath("profiler"), filename="profile")
 
 # initialize logger for the Trainer class
 loggers = [DictLogger()]
@@ -258,13 +291,16 @@ loggers = [DictLogger()]
 # initialize training callbacks
 MODELS_PATH.joinpath("generatecallback").mkdir(parents=True, exist_ok=True)
 callbacks = [
-    RichProgressBar(refresh_rate=1),
-    GenerateCallback(
-        MODELS_PATH.joinpath("generatecallback", "during.png"),
-        plot_epoch_callback=plot_epoch_callback,
-        true_beta=beta.cpu().numpy()
-    ),
+    RichProgressBar(refresh_rate=progressbar_rate),
+    #GenerateCallback(
+    #    MODELS_PATH.joinpath("generatecallback", "during.png"),
+    #    plot_epoch_callback=plot_epoch_callback,
+    #    true_beta=beta.cpu().numpy()
+    #),
+
 ]
+if monitor_stats:
+    callbacks.append(DeviceStatsMonitor())
 if swa > 0:
     callbacks.append(StochasticWeightAveraging(0.01, swa_epoch_start=swa))
 
@@ -290,23 +326,29 @@ if CHECKPOINTING:
 
 
 # pretraining
-n_epochs_pretrain_latents = 100
-
+n_epochs_pretrain_latents = int(10000//scale_factor + 10000//scale_factor % 2
+)
 if model.use_latents and n_epochs_pretrain_latents > 0:
     print(f"Pretraining model latents for {n_epochs_pretrain_latents} epochs...")
     pretrain_callbacks = [
         RichProgressBar(refresh_rate=1),
-        GenerateCallback(
-            str(MODELS_PATH.joinpath("generatecallback","pretrain_during.png")),
-            plot_epoch_callback=plot_epoch_callback,
-            true_beta=beta.cpu().numpy(),
-        ),
+        #GenerateCallback(
+        #    str(MODELS_PATH.joinpath("generatecallback","pretrain_during.png")),
+        #    plot_epoch_callback=plot_epoch_callback,
+        #    true_beta=beta.cpu().numpy(),
+        #),
+        
     ]
+    if monitor_stats:
+        pretrain_callbacks.append(DeviceStatsMonitor())
 
     if swa > 0:
         pretrain_callbacks.append(StochasticWeightAveraging(0.01, swa_epoch_start=swa))
 
+    MODELS_PATH.joinpath("mylogger").mkdir(parents=True, exist_ok=True)
     pretrain_callbacks.append(MyLoggerCallback(dirpath=os.path.join(MODELS_PATH, "mylogger")))
+
+    profiler.filename = "pretraining_profile"
 
     pretrainer = pl.Trainer(
         max_epochs=n_epochs_pretrain_latents,
@@ -317,13 +359,14 @@ if model.use_latents and n_epochs_pretrain_latents > 0:
         enable_progress_bar=True,
         enable_checkpointing=CHECKPOINTING,
         check_val_every_n_epoch=check_val_every_n_epoch,
-        devices=[GPU_DEVICE],  # if str(device).startswith("cuda") else 1,
+        devices=GPU_DEVICES,  # if str(device).startswith("cuda") else 1,
         num_sanity_val_steps=0,
         callbacks=pretrain_callbacks,
         gradient_clip_val=gradient_clip_val,
         default_root_dir=str(MODELS_PATH),
         gradient_clip_algorithm="value",
         deterministic=False,  # "warn",
+        profiler=profiler,
     )
     print("PRETRAINING LATENTS!")
     start_time = time.time()
@@ -331,7 +374,7 @@ if model.use_latents and n_epochs_pretrain_latents > 0:
     pretrainer.fit(model, train_loader, validation_loader)
     end_time = time.time()
     model.train_only_likelihood = False
-
+    profiler.filename = "training_profile"
     pretraining_time = float(end_time - start_time)
     print(f"Pretraining took {pretraining_time} seconds.")
 
@@ -346,13 +389,14 @@ trainer = pl.Trainer(
     enable_progress_bar=True,
     enable_checkpointing=CHECKPOINTING,
     check_val_every_n_epoch=check_val_every_n_epoch,
-    devices=[GPU_DEVICE],  # if str(device).startswith("cuda") else 1,
+    devices=GPU_DEVICES,  # if str(device).startswith("cuda") else 1,
     num_sanity_val_steps=0,
     callbacks=callbacks,
     gradient_clip_val=gradient_clip_val,
     default_root_dir=str(MODELS_PATH),
     gradient_clip_algorithm="value",
     deterministic=False,  # "warn",
+    profiler=profiler,
 )
 
 print("TRAINING THE MODEL!")
