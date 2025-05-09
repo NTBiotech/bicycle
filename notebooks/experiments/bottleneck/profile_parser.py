@@ -108,7 +108,8 @@ def filter_profiler_records(df, df_sum):
                 clean_df.loc[len(clean_df)] = row
         df_sum.loc[func_index, "Time"] -= profiler_time
         df_sum.loc[func_index, "Call_num"] -= profiler_calls
-    return df_sum,clean_df
+    return clean_df, df_sum
+
 def process_profile_data(df, df_sum):
     full_dtype_converter = {
     "ncalls": int,
@@ -150,6 +151,7 @@ def process_profile_data(df, df_sum):
 
 # parse the models dict for profiler data from testrun_synthetic_benchmark.py
 def fullparse_profiles(
+        filtering:bool=True,
         pickle:bool=False,
         MODELS_PATH: Path = Path("/data/toulouse/bicycle/notebooks/experiments/bottleneck/data/models"),
         ANALYSIS_PATH:Path=Path("/data/toulouse/bicycle/notebooks/experiments/bottleneck/data/analysis"),
@@ -184,8 +186,10 @@ def fullparse_profiles(
             df, df_sum = read_profile(subdir.joinpath("profiler", "fit-training_profile.txt"))
 
         # remove profiler traces
-            df_sum, clean_df = filter_profiler_records(df, df_sum)
-
+            if filtering:
+                clean_df, df_sum = filter_profiler_records(df, df_sum)
+            else:
+                clean_df = df
 
             df, df_sum = process_profile_data(df, df_sum)
             if pickle:
@@ -199,8 +203,10 @@ def fullparse_profiles(
             if subdir.joinpath("profiler/fit-pretraining_profile.txt").exists():
                 df, df_sum = read_profile(subdir.joinpath("profiler/fit-pretraining_profile.txt"))
 
-
-                df_sum, clean_df = filter_profiler_records(df, df_sum)
+                if filtering:
+                    clean_df, df_sum = filter_profiler_records(df, df_sum)
+                else:
+                    clean_df = df
 
                 df, df_sum = process_profile_data(df, df_sum)
 
