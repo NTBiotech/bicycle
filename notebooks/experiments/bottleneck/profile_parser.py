@@ -156,7 +156,7 @@ def fullparse_profiles(
         pickle:bool=False,
         MODELS_PATH: Path = Path("/data/toulouse/bicycle/notebooks/experiments/bottleneck/data/models"),
         ANALYSIS_PATH:Path=Path("/data/toulouse/bicycle/notebooks/experiments/bottleneck/data/analysis"),
-        hyperparameter_names: list = ["run_id","data_n_genes", "data_n_samples_control", "data_n_samples_per_perturbation", "batch_size", "n_epochs", "n_epochs_pretrain_latents", "scale_factor"],
+        hyperparameter_names: list = ["run_id","data_n_genes", "data_n_samples_control", "data_n_samples_per_perturbation", "batch_size", "n_epochs", "n_epochs_pretrain_latents", "scale_factor", "training_time", "pretraining_time"],
     ):
     """
     Standard run to parse all profile output files in MODELS_PATH inside subdirectories with name "test_run_<run_id>".
