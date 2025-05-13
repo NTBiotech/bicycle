@@ -100,7 +100,7 @@ def filter_profiler_records(df, df_sum):
         profiler_calls = 0
         sub_sel = df.loc[df["Function"] == function]
         for _, row in sub_sel.iterrows():
-            if "profiler".casefold() in row["filename:lineno(function)"].casefold():
+            if "profiler".casefold() in row["filename:lineno(function)"].casefold() or "posix".casefold() in row["filename:lineno(function)"].casefold():
                 profiler_time += row["tot_time"]
                 profiler_calls += row["ncalls"]
                 continue
@@ -143,7 +143,7 @@ def process_profile_data(df, df_sum):
     df = df.astype(full_dtype_converter)
     df["Class_Function"] = df["Class"] + "_" + df["Function"]
     df["filename_lineno(function)"] = df["filename:lineno(function)"]
-    df.drop(columns=["filename:lineno(function)"])
+    df = df.drop(columns=["filename:lineno(function)"])
     df["Class_Function_etc"] = df["Class_Function"] + ":" + df["filename_lineno(function)"]
     df["is_callback"] = df["Class"].apply(lambda x: "Callback" in x)
 
@@ -151,6 +151,7 @@ def process_profile_data(df, df_sum):
 
 # parse the models dict for profiler data from testrun_synthetic_benchmark.py
 def fullparse_profiles(
+        pretraining:bool = False,
         filtering:bool=True,
         pickle:bool=False,
         MODELS_PATH: Path = Path("/data/toulouse/bicycle/notebooks/experiments/bottleneck/data/models"),
@@ -187,26 +188,25 @@ def fullparse_profiles(
 
         # remove profiler traces
             if filtering:
-                clean_df, df_sum = filter_profiler_records(df, df_sum)
-            else:
-                clean_df = df
+                df, df_sum = filter_profiler_records(df, df_sum)
 
             df, df_sum = process_profile_data(df, df_sum)
             if pickle:
-                clean_df.to_pickle(ANALYSIS_PATH.joinpath(key, "full_training_profile.gz"))
+                if not ANALYSIS_PATH.joinpath(key).is_dir():
+                    ANALYSIS_PATH.joinpath(key).mkdir(parents=True, exist_ok=True)
+                df.to_pickle(ANALYSIS_PATH.joinpath(key, "full_training_profile.gz"))
                 df_sum.to_pickle(ANALYSIS_PATH.joinpath(key, "training_profile.gz"))
+
             profile_dict[key] = dict()
-            profile_dict[key]["full_training_profile"] = clean_df
+            profile_dict[key]["full_training_profile"] = df
             profile_dict[key]["training_profile"] = df_sum
 
             # check for pretraining profiles
-            if subdir.joinpath("profiler/fit-pretraining_profile.txt").exists():
+            if subdir.joinpath("profiler/fit-pretraining_profile.txt").exists() and pretraining:
                 df, df_sum = read_profile(subdir.joinpath("profiler/fit-pretraining_profile.txt"))
 
                 if filtering:
-                    clean_df, df_sum = filter_profiler_records(df, df_sum)
-                else:
-                    clean_df = df
+                    df, df_sum = filter_profiler_records(df, df_sum)
 
                 df, df_sum = process_profile_data(df, df_sum)
 
@@ -220,3 +220,5 @@ def fullparse_profiles(
         hyperparameters.to_csv(ANALYSIS_PATH.joinpath("parameters.csv"))
 
     return hyperparameters, profile_dict
+
+fullparse_profiles(pickle=True)
