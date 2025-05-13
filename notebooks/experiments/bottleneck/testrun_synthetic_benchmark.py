@@ -36,8 +36,11 @@ argparser.add_argument("--seed", type=int, help="Random seed for reproducibility
 argparser.add_argument("--scale_factor", type=float, help="Scaling factor for parameters")
 argparser.add_argument("--GPU", type=int, help="GPU device ID to use")
 argparser.add_argument("--monitor_stats", type=bool)
+argparser.add_argument("--profile", type=bool)
 argparser.add_argument("--checkpointing", type=bool)
+argparser.add_argument("--compile", type=bool)
 argparser.add_argument("--progressbar_rate", type=int)
+argparser.add_argument("--compiler_kwargs", type=dict)
 
 args = argparser.parse_args()
 
@@ -45,9 +48,11 @@ SEED = 1
 scale_factor = 1
 GPU_DEVICES = [1]
 monitor_stats = False
+profile = False
 CHECKPOINTING = False
 progressbar_rate = 0
-
+compile = False
+compiler_kwargs = {}
 
 if args.seed:
     SEED = args.seed
@@ -60,6 +65,15 @@ if args.GPU:
 
 if args.monitor_stats:
     monitor_stats = args.monitor_stats
+
+if args.profile:
+    profile = args.profile
+
+if args.compile:
+    compile = args.compile
+
+if args.compiler_kwargs:
+    compiler_kwargs = args.compiler_kwargs
 
 if args.checkpointing:
     CHECKPOINTING = args.checkpointing
@@ -262,6 +276,8 @@ model = BICYCLE(
     mask_genes = model_mask_genes,
 )
 
+if compile:
+    torch.compile(model=model, **compiler_kwargs)
 model.to(model_device)
 
 
@@ -281,9 +297,10 @@ VERBOSE_CHECKPOINTING = False
 check_val_every_n_epoch = 1
 log_every_n_steps = 1
 
-# initialize profiler to find bottlenecks
-MODELS_PATH.joinpath("profiler").mkdir(parents=True, exist_ok=True)
-profiler = AdvancedProfiler(dirpath=MODELS_PATH.joinpath("profiler"), filename="profile")
+if profile:
+    # initialize profiler to find bottlenecks
+    MODELS_PATH.joinpath("profiler").mkdir(parents=True, exist_ok=True)
+    profiler = AdvancedProfiler(dirpath=MODELS_PATH.joinpath("profiler"), filename="profile")
 
 # initialize logger for the Trainer class
 loggers = [DictLogger()]
@@ -348,7 +365,8 @@ if model.use_latents and n_epochs_pretrain_latents > 0:
     MODELS_PATH.joinpath("mylogger").mkdir(parents=True, exist_ok=True)
     pretrain_callbacks.append(MyLoggerCallback(dirpath=os.path.join(MODELS_PATH, "mylogger")))
 
-    profiler.filename = "pretraining_profile"
+    if profile:
+        profiler.filename = "pretraining_profile"
 
     pretrainer = pl.Trainer(
         max_epochs=n_epochs_pretrain_latents,
@@ -366,7 +384,7 @@ if model.use_latents and n_epochs_pretrain_latents > 0:
         default_root_dir=str(MODELS_PATH),
         gradient_clip_algorithm="value",
         deterministic=False,  # "warn",
-        profiler=profiler,
+        profiler=profiler if profile else None,
     )
     print("PRETRAINING LATENTS!")
     start_time = time.time()
@@ -374,7 +392,8 @@ if model.use_latents and n_epochs_pretrain_latents > 0:
     pretrainer.fit(model, train_loader, validation_loader)
     end_time = time.time()
     model.train_only_likelihood = False
-    profiler.filename = "training_profile"
+    if profile:
+        profiler.filename = "training_profile"
     pretraining_time = float(end_time - start_time)
     print(f"Pretraining took {pretraining_time} seconds.")
 
@@ -396,7 +415,7 @@ trainer = pl.Trainer(
     default_root_dir=str(MODELS_PATH),
     gradient_clip_algorithm="value",
     deterministic=False,  # "warn",
-    profiler=profiler,
+    profiler=profiler if profile else None,
 )
 
 print("TRAINING THE MODEL!")
