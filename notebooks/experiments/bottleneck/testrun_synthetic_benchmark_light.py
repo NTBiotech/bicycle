@@ -15,14 +15,15 @@ import numpy as np
 import pandas as pd
 import torch
 import pytorch_lightning as pl
-from pytorch_lightning.callbacks import RichProgressBar, StochasticWeightAveraging, DeviceStatsMonitor
+from pytorch_lightning.callbacks import StochasticWeightAveraging, DeviceStatsMonitor
 from pytorch_lightning.profilers import AdvancedProfiler
+from pytorch_lightning.loggers import Logger
+
 
 from bicycle.model import BICYCLE
 from bicycle.utils.data import create_data, create_loaders, get_diagonal_mask
 from bicycle.utils.general import get_id
 from bicycle.utils.plotting import plot_training_results
-from bicycle.dictlogger import DictLogger
 from bicycle.callbacks import (
     CustomModelCheckpoint,
     GenerateCallback,
@@ -45,6 +46,8 @@ argparser.add_argument("--compiler_dynamic", type=bool)
 argparser.add_argument("--compiler_mode", type=str)
 argparser.add_argument("--loader_workers", type=int)
 argparser.add_argument("--trainer_precision", choices=[64, 32, 16])
+
+
 args = argparser.parse_args()
 
 SEED = 1
@@ -56,7 +59,10 @@ CHECKPOINTING = False
 progressbar_rate = 0
 compile = False
 compiler_kwargs = {}
-loader_workers = 64
+compiler_fullgraph = False
+compiler_dynamic = False
+compiler_mode = None
+loader_workers=64
 trainer_precision=32
 
 if args.seed:
@@ -82,7 +88,6 @@ if args.compiler_dynamic:
     compiler_dynamic = args.compiler_dynamic
 if args.compiler_mode:
     compiler_mode= args.compiler_mode
-
 
 if args.checkpointing:
     CHECKPOINTING = args.checkpointing
@@ -321,19 +326,11 @@ if profile:
     profiler = AdvancedProfiler(dirpath=MODELS_PATH.joinpath("profiler"), filename="profile")
 
 # initialize logger for the Trainer class
-loggers = [DictLogger()]
+loggers = None
 
 # initialize training callbacks
 MODELS_PATH.joinpath("generatecallback").mkdir(parents=True, exist_ok=True)
-callbacks = [
-    RichProgressBar(refresh_rate=progressbar_rate),
-    #GenerateCallback(
-    #    MODELS_PATH.joinpath("generatecallback", "during.png"),
-    #    plot_epoch_callback=plot_epoch_callback,
-    #    true_beta=beta.cpu().numpy()
-    #),
-
-]
+callbacks = []
 if monitor_stats:
     callbacks.append(DeviceStatsMonitor())
 if swa > 0:
@@ -365,15 +362,7 @@ n_epochs_pretrain_latents = int(10000//scale_factor + 10000//scale_factor % 2
 )
 if model.use_latents and n_epochs_pretrain_latents > 0:
     print(f"Pretraining model latents for {n_epochs_pretrain_latents} epochs...")
-    pretrain_callbacks = [
-        RichProgressBar(refresh_rate=1),
-        #GenerateCallback(
-        #    str(MODELS_PATH.joinpath("generatecallback","pretrain_during.png")),
-        #    plot_epoch_callback=plot_epoch_callback,
-        #    true_beta=beta.cpu().numpy(),
-        #),
-        
-    ]
+    pretrain_callbacks = []
     if monitor_stats:
         pretrain_callbacks.append(DeviceStatsMonitor())
 
@@ -403,7 +392,6 @@ if model.use_latents and n_epochs_pretrain_latents > 0:
         gradient_clip_algorithm="value",
         deterministic=False,  # "warn",
         profiler=profiler if profile else None,
-        precision=trainer_precision
     )
     print("PRETRAINING LATENTS!")
     start_time = time.time()
@@ -435,7 +423,6 @@ trainer = pl.Trainer(
     gradient_clip_algorithm="value",
     deterministic=False,  # "warn",
     profiler=profiler if profile else None,
-    precision=trainer_precision
 )
 
 print("TRAINING THE MODEL!")
