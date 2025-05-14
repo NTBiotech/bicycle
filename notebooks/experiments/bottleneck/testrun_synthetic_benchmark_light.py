@@ -6,10 +6,10 @@ Generates diagostics and output data in the data subdirectory.
 TODO: set data_device to cpu again
 
 """
+import time
 current_time = time.strftime("%j%m%d%H%M%Z", time.gmtime())
 
 import os
-import time
 from pathlib import Path
 
 import numpy as np
@@ -112,7 +112,7 @@ torch.set_float32_matmul_precision(matmul_precision)
 
 """
 commonly used parameters:
-n_genes
+n_genes -> must be >2 => scale_factor>5
 n_samples_control
 n_samples_per_perturbation
 batch_size
