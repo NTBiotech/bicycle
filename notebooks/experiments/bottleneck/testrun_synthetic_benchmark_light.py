@@ -6,6 +6,7 @@ Generates diagostics and output data in the data subdirectory.
 TODO: set data_device to cpu again
 
 """
+current_time = time.strftime("%j%m%d%H%M%Z", time.gmtime())
 
 import os
 import time
@@ -45,7 +46,8 @@ argparser.add_argument("--compiler_fullgraph", type=bool)
 argparser.add_argument("--compiler_dynamic", type=bool)
 argparser.add_argument("--compiler_mode", type=str)
 argparser.add_argument("--loader_workers", type=int)
-argparser.add_argument("--trainer_precision", choices=[64, 32, 16])
+argparser.add_argument("--trainer_precision", choices=[64, 32, 16], type=int)
+argparser.add_argument("--matmul_precision", choices=["high","highest","medium"], type=str)
 
 
 args = argparser.parse_args()
@@ -62,8 +64,9 @@ compiler_kwargs = {}
 compiler_fullgraph = False
 compiler_dynamic = False
 compiler_mode = None
-loader_workers=64
+loader_workers=1
 trainer_precision=32
+matmul_precision="high"
 
 if args.seed:
     SEED = args.seed
@@ -101,8 +104,11 @@ if args.loader_workers:
 if args.trainer_precision:
     trainer_precision= args.trainer_precision
 
+if args.matmul_precision:
+    matmul_precision=args.matmul_precision
+
 pl.seed_everything(SEED)
-torch.set_float32_matmul_precision("high")
+torch.set_float32_matmul_precision(matmul_precision)
 
 """
 commonly used parameters:
@@ -369,8 +375,9 @@ if model.use_latents and n_epochs_pretrain_latents > 0:
     if swa > 0:
         pretrain_callbacks.append(StochasticWeightAveraging(0.01, swa_epoch_start=swa))
 
-    MODELS_PATH.joinpath("mylogger").mkdir(parents=True, exist_ok=True)
-    pretrain_callbacks.append(MyLoggerCallback(dirpath=os.path.join(MODELS_PATH, "mylogger")))
+    if CHECKPOINTING:
+        MODELS_PATH.joinpath("mylogger").mkdir(parents=True, exist_ok=True)
+        pretrain_callbacks.append(MyLoggerCallback(dirpath=os.path.join(MODELS_PATH, "mylogger")))
 
     if profile:
         profiler.filename = "pretraining_profile"
@@ -392,6 +399,7 @@ if model.use_latents and n_epochs_pretrain_latents > 0:
         gradient_clip_algorithm="value",
         deterministic=False,  # "warn",
         profiler=profiler if profile else None,
+        precision=trainer_precision,
     )
     print("PRETRAINING LATENTS!")
     start_time = time.time()
@@ -423,6 +431,7 @@ trainer = pl.Trainer(
     gradient_clip_algorithm="value",
     deterministic=False,  # "warn",
     profiler=profiler if profile else None,
+    precision=trainer_precision,
 )
 
 print("TRAINING THE MODEL!")
@@ -448,7 +457,6 @@ plot_training_results(
     labels=None,
 )
 
-# log the environment
-current_time = time.strftime("%j%m%d%H%M%Z", time.gmtime())
 
+# log the environment
 pd.DataFrame(globals().items()).to_csv(os.path.join(PLOTS_PATH, "globals.csv"))
