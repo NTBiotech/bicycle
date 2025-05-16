@@ -37,13 +37,13 @@ argparser = argparse.ArgumentParser()
 argparser.add_argument("--seed", type=int, help="Random seed for reproducibility")
 argparser.add_argument("--scale_factor", type=float, help="Scaling factor for parameters")
 argparser.add_argument("--GPU", type=int, help="GPU device ID to use")
-argparser.add_argument("--monitor_stats", type=bool)
-argparser.add_argument("--profile", type=bool)
-argparser.add_argument("--checkpointing", type=bool)
+argparser.add_argument("--monitor_stats", action="store_true")
+argparser.add_argument("--profile", action="store_true")
+argparser.add_argument("--checkpointing", action="store_true")
 argparser.add_argument("--progressbar_rate", type=int)
-argparser.add_argument("--compile", type=bool)
-argparser.add_argument("--compiler_fullgraph", type=bool)
-argparser.add_argument("--compiler_dynamic", type=bool)
+argparser.add_argument("--compile", action="store_true")
+argparser.add_argument("--compiler_fullgraph", action="store_true")
+argparser.add_argument("--compiler_dynamic", action="store_true")
 argparser.add_argument("--compiler_mode", type=str)
 argparser.add_argument("--loader_workers", type=int)
 argparser.add_argument("--trainer_precision", choices=[64, 32, 16], type=int)
@@ -51,6 +51,7 @@ argparser.add_argument("--matmul_precision", choices=["high","highest","medium"]
 
 
 args = argparser.parse_args()
+print("Passed arguments:",args)
 
 SEED = 1
 scale_factor = 1
@@ -442,20 +443,6 @@ end_time = time.time()
 
 training_time = float(end_time - start_time)
 print(f"Training took {training_time} seconds.")
-
-plot_training_results(
-    trainer = trainer,
-    pl_module = model,
-    estimated_beta = model.beta.detach().cpu().numpy(),
-    true_beta = model_gt_beta,
-    scale_l1 = model_scale_l1,
-    scale_kl = model_scale_kl,
-    scale_spectral = model_scale_spectral,
-    scale_lyapunov = model_scale_lyapunov,
-    file_name_plot = PLOTS_PATH.joinpath("last.png"),
-    callback=True,
-    labels=None,
-)
 
 
 # log the environment
