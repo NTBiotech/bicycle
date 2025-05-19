@@ -17,7 +17,10 @@ argparser = argparse.ArgumentParser()
 argparser.add_argument("--MODELS_PATH", type=str)
 argparser.add_argument("--PLOTS_PATH", type=str)
 argparser.add_argument("--ANALYSIS_PATH", type=str)
-argparser.add_argument("--exclude", type=list)
+argparser.add_argument("--filtering", action="store_true")
+argparser.add_argument("-e", action="append", default=[])
+argparser.add_argument("-i", action="append", default=[])
+argparser.add_argument("--pretraining", action="store_true")
 args=argparser.parse_args()
 if args.MODELS_PATH:
     MODELS_PATH=args.MODELS_PATH
@@ -28,8 +31,6 @@ if args.PLOTS_PATH:
 if args.ANALYSIS_PATH:
     ANALYSIS_PATH=args.ANALYSIS_PATH
 
-if args.exclude:
-    exclude = args.exclude
 
 def read_profile(path: Path, rank: bool = False):
     """
@@ -153,10 +154,17 @@ def process_profile_data(df, df_sum):
 def fullparse_profiles(
         pretraining:bool = False,
         filtering:bool=True,
-        pickle:bool=False,
         MODELS_PATH: Path = Path("/data/toulouse/bicycle/notebooks/experiments/bottleneck/data/models"),
         ANALYSIS_PATH:Path=Path("/data/toulouse/bicycle/notebooks/experiments/bottleneck/data/analysis"),
-        hyperparameter_names: list = ["run_id","data_n_genes", "data_n_samples_control", "data_n_samples_per_perturbation", "batch_size", "n_epochs", "n_epochs_pretrain_latents", "scale_factor", "training_time", "pretraining_time"],
+        hyperparameter_names: list = ["run_id","data_n_genes", "data_n_samples_control", "data_n_samples_per_perturbation",
+                                       "batch_size", "n_epochs", "n_epochs_pretrain_latents", "scale_factor",
+                                       "training_time", "pretraining_time", "profile",
+                                       "compile", "compiler_mode", "compiler_fullgraph", "compiler_dynamic", "monitor_stats", 
+                                       "loader_workers", "matmul_precision", "trainer_precision"],
+        include: list = [],
+        exclude: list=[],
+        csv: bool=True,
+        pickle:bool=False,
     ):
     """
     Standard run to parse all profile output files in MODELS_PATH inside subdirectories with name "test_run_<run_id>".
@@ -173,52 +181,119 @@ def fullparse_profiles(
 
 
     for subdir in MODELS_PATH.iterdir():
-        if subdir.joinpath("profiler", "fit-training_profile.txt").exists():
-            key = str(subdir.name)
-            if key in exclude:
-                print(f"Skipping {key}!")
-                continue
-            print(subdir)
-        # get globals of run
-            globs = pd.read_csv(PLOTS_PATH.joinpath(key, "globals.csv"), delimiter=",").set_index("0", drop=True).T
-            available_paras = [n for n in hyperparameter_names if n in globs.columns]
-            hyperparameters.loc[len(hyperparameters)] = globs[available_paras].iloc[1]
+        if len(include)<1:
+            if subdir.joinpath("profiler", "fit-training_profile.txt").exists():
+                key = str(subdir.name)
+                if key in exclude:
+                    print(f"Skipping {key}!")
+                    continue
+                print(subdir)
+            # get globals of run
+                try:
+                    globs = pd.read_csv(PLOTS_PATH.joinpath(key, "globals.csv"), delimiter=",").set_index("0", drop=True).T
+                    available_paras = [n for n in hyperparameter_names if n in globs.columns]
+                    hyperparameters.loc[len(hyperparameters)] = globs[available_paras].iloc[1]
+                except FileNotFoundError:
+                    print(f"globals file for {key} not found!")
 
-            df, df_sum = read_profile(subdir.joinpath("profiler", "fit-training_profile.txt"))
+                df, df_sum = read_profile(subdir.joinpath("profiler", "fit-training_profile.txt"))
 
-        # remove profiler traces
-            if filtering:
-                df, df_sum = filter_profiler_records(df, df_sum)
-
-            df, df_sum = process_profile_data(df, df_sum)
-            if pickle:
-                if not ANALYSIS_PATH.joinpath(key).is_dir():
-                    ANALYSIS_PATH.joinpath(key).mkdir(parents=True, exist_ok=True)
-                df.to_pickle(ANALYSIS_PATH.joinpath(key, "full_training_profile.gz"))
-                df_sum.to_pickle(ANALYSIS_PATH.joinpath(key, "training_profile.gz"))
-
-            profile_dict[key] = dict()
-            profile_dict[key]["full_training_profile"] = df
-            profile_dict[key]["training_profile"] = df_sum
-
-            # check for pretraining profiles
-            if subdir.joinpath("profiler/fit-pretraining_profile.txt").exists() and pretraining:
-                df, df_sum = read_profile(subdir.joinpath("profiler/fit-pretraining_profile.txt"))
-
+            # remove profiler traces
                 if filtering:
                     df, df_sum = filter_profiler_records(df, df_sum)
 
                 df, df_sum = process_profile_data(df, df_sum)
-
                 if pickle:
-                    df.to_pickle(ANALYSIS_PATH.joinpath(key, "full_pretraining_profile.gz"))
-                    df_sum.to_pickle(ANALYSIS_PATH.joinpath(key, "pretraining_profile.gz"))
+                    if not ANALYSIS_PATH.joinpath(key).is_dir():
+                        ANALYSIS_PATH.joinpath(key).mkdir(parents=True, exist_ok=True)
+                    df.to_pickle(ANALYSIS_PATH.joinpath(key, "full_training_profile.gz"))
+                    df_sum.to_pickle(ANALYSIS_PATH.joinpath(key, "training_profile.gz"))
+                if csv:
+                    if not ANALYSIS_PATH.joinpath(key).is_dir():
+                        ANALYSIS_PATH.joinpath(key).mkdir(parents=True, exist_ok=True)
+                    df.to_csv(ANALYSIS_PATH.joinpath(key, "full_training_profile.csv"))
+                    df_sum.to_csv(ANALYSIS_PATH.joinpath(key, "training_profile.csv"))
 
-                profile_dict[key]["full_pretraining_profile"] = df
-                profile_dict[key]["pretraining_profile"] = df_sum
-    if pickle:
+                profile_dict[key] = dict()
+                profile_dict[key]["full_training_profile"] = df
+                profile_dict[key]["training_profile"] = df_sum
+
+                # check for pretraining profiles
+                if subdir.joinpath("profiler/fit-pretraining_profile.txt").exists() and pretraining:
+                    df, df_sum = read_profile(subdir.joinpath("profiler/fit-pretraining_profile.txt"))
+
+                    if filtering:
+                        df, df_sum = filter_profiler_records(df, df_sum)
+
+                    df, df_sum = process_profile_data(df, df_sum)
+
+                    if pickle:
+                        df.to_pickle(ANALYSIS_PATH.joinpath(key, "full_pretraining_profile.gz"))
+                        df_sum.to_pickle(ANALYSIS_PATH.joinpath(key, "pretraining_profile.gz"))
+                    if csv:
+                        df.to_csv(ANALYSIS_PATH.joinpath(key, "full_pretraining_profile.csv"))
+                        df_sum.to_csv(ANALYSIS_PATH.joinpath(key, "pretraining_profile.csv"))
+
+                    profile_dict[key]["full_pretraining_profile"] = df
+                    profile_dict[key]["pretraining_profile"] = df_sum
+        else:
+            if subdir.joinpath("profiler", "fit-training_profile.txt").exists() and str(subdir.name) in include:
+                key = str(subdir.name)
+                if key in exclude:
+                    print(f"Skipping {key}!")
+                    continue
+                print(subdir)
+            # get globals of run
+                try:
+                    globs = pd.read_csv(PLOTS_PATH.joinpath(key, "globals.csv"), delimiter=",").set_index("0", drop=True).T
+                    available_paras = [n for n in hyperparameter_names if n in globs.columns]
+                    hyperparameters.loc[len(hyperparameters)] = globs[available_paras].iloc[1]
+                except FileNotFoundError:
+                    print(f"globals file for {key} not found!")
+
+                df, df_sum = read_profile(subdir.joinpath("profiler", "fit-training_profile.txt"))
+
+            # remove profiler traces
+                if filtering:
+                    df, df_sum = filter_profiler_records(df, df_sum)
+
+                df, df_sum = process_profile_data(df, df_sum)
+                if pickle:
+                    if not ANALYSIS_PATH.joinpath(key).is_dir():
+                        ANALYSIS_PATH.joinpath(key).mkdir(parents=True, exist_ok=True)
+                    df.to_pickle(ANALYSIS_PATH.joinpath(key, "full_training_profile.gz"))
+                    df_sum.to_pickle(ANALYSIS_PATH.joinpath(key, "training_profile.gz"))
+                if csv:
+                    if not ANALYSIS_PATH.joinpath(key).is_dir():
+                        ANALYSIS_PATH.joinpath(key).mkdir(parents=True, exist_ok=True)
+                    df.to_csv(ANALYSIS_PATH.joinpath(key, "full_training_profile.csv"))
+                    df_sum.to_csv(ANALYSIS_PATH.joinpath(key, "training_profile.csv"))
+
+                profile_dict[key] = dict()
+                profile_dict[key]["full_training_profile"] = df
+                profile_dict[key]["training_profile"] = df_sum
+
+                # check for pretraining profiles
+                if subdir.joinpath("profiler/fit-pretraining_profile.txt").exists() and pretraining:
+                    df, df_sum = read_profile(subdir.joinpath("profiler/fit-pretraining_profile.txt"))
+
+                    if filtering:
+                        df, df_sum = filter_profiler_records(df, df_sum)
+
+                    df, df_sum = process_profile_data(df, df_sum)
+
+                    if pickle:
+                        df.to_pickle(ANALYSIS_PATH.joinpath(key, "full_pretraining_profile.gz"))
+                        df_sum.to_pickle(ANALYSIS_PATH.joinpath(key, "pretraining_profile.gz"))
+                    if csv:
+                        df.to_csv(ANALYSIS_PATH.joinpath(key, "full_pretraining_profile.csv"))
+                        df_sum.to_csv(ANALYSIS_PATH.joinpath(key, "pretraining_profile.csv"))
+
+                    profile_dict[key]["full_pretraining_profile"] = df
+                    profile_dict[key]["pretraining_profile"] = df_sum
+    if pickle or csv:
         hyperparameters.to_csv(ANALYSIS_PATH.joinpath("parameters.csv"))
 
     return hyperparameters, profile_dict
 
-fullparse_profiles(pickle=True)
+fullparse_profiles(csv=True, filtering=args.filtering, include=args.i, exclude=args.e, pretraining=args.pretraining)

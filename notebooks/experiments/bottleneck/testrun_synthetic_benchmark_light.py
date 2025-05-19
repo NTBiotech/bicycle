@@ -51,7 +51,7 @@ argparser.add_argument("--matmul_precision", choices=["high","highest","medium"]
 
 
 args = argparser.parse_args()
-print("Passed arguments:",args)
+print("Passed arguments: ",args)
 
 SEED = 1
 scale_factor = 1
