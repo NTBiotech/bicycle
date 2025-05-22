@@ -19,6 +19,9 @@ dependencies:
 - rich=13.5.3
 - scanpy=1.9.3
 - scikit-misc=0.1.4
+- matplotlib
+- seaborn
+- pip
 - pip:
   - ipywidgets
   - gseapy
