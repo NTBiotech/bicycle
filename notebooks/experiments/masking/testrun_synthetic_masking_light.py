@@ -50,6 +50,7 @@ argparser.add_argument("--trainer_precision", choices=[64, 32, 16], type=int)
 argparser.add_argument("--matmul_precision", choices=["high","highest","medium"], type=str)
 argparser.add_argument("--parameter_set", type=str)
 argparser.add_argument("--masking", action="store_true")
+argparser.add_argument("--use_hard_mask", action="store_true")
 argparser.add_argument("--masking_mode", choices=["init", "loss"], type=str)
 argparser.add_argument("--DATA_PATH", type=str)
 argparser.add_argument("--trad_loading", action="store_true")
@@ -72,11 +73,12 @@ compiler_kwargs = {}
 compiler_fullgraph = False
 compiler_dynamic = False
 compiler_mode = None
-loader_workers=1
+loader_workers=5
 trainer_precision=32
 matmul_precision="high"
 masking = False
 masking_mode = "init"
+use_hard_mask = False
 parameter_set = "params5"
 trad_loading=False
 DATA_PATH = Path("/data/toulouse/bicycle/notebooks/experiments/masking/data")
@@ -127,6 +129,8 @@ if args.masking:
     masking = args.masking
 if args.masking_mode:
     masking_mode = args.masking_mode
+if args.use_hard_mask:
+    use_hard_mask = args.use_hard_mask
 
 if args.trad_loading:
     trad_loading=args.trad_loading
@@ -272,14 +276,35 @@ else:
     # get gt_beta
     sms_path = DATA_PATH/"scMultiSim_data"/data_id
     grn = pd.read_csv(sms_path/"geff.csv", index_col=0)
+    TFs = grn.columns.to_list()
     rna = sc.read_h5ad(sms_path/"ready_full_rna.h5ad")
     atac = sc.read_h5ad(sms_path/"ready_full_atac.h5ad")
     region_to_gene = pd.read_csv(sms_path/"region_to_gene.csv", index_col=0).to_numpy()
     region_to_tf = pd.read_csv(sms_path/"region_to_tf.csv", index_col=0).to_numpy()
     with open(parameters_path, "rb") as rf:
         masking_parameters = pickle.load(rf)
-    # pad geff matrix with non tf genes
-    beta = np.concatenate([grn, np.zeros((len(grn), len(grn)-grn.shape[1]))], axis=1).T
+    # pad geff matrix with non tf genes and transpose
+    beta = np.empty((grn.shape[0], grn.shape[0]))
+    for n, (gene_name, row) in enumerate(grn.iterrows()):
+        if str(gene_name) in TFs:
+            beta[n] = grn[str(gene_name)]
+        else:
+            beta[n] = np.zeros(grn.shape[0])
+    if use_hard_mask:
+        # create hard mask to limit interactions
+        possible_interactions = np.absolute(region_to_gene.T @ region_to_tf)>=1
+        possible_interactions=pd.DataFrame(possible_interactions, columns=TFs, index=grn.index)
+        # pad with non tf genes and transpose
+        hard_mask = np.empty((possible_interactions.shape[0], possible_interactions.shape[0]))
+        for n, (gene, row) in enumerate(possible_interactions.iterrows()):
+            if str(gene) in TFs:
+                hard_mask[n] = possible_interactions[str(gene)]
+            else:
+                hard_mask[n] = np.zeros(possible_interactions.shape[0])
+        # limit self interactions
+        hard_mask*=np.diag(np.zeros(hard_mask.shape[0]))
+
+    
     
     
 
@@ -301,7 +326,8 @@ else:
     mask = np.concatenate([mask, np.zeros((len(mask), len(mask)-mask.shape[1]))], axis=1)
     if validation_size>0:
         train_loader,validation_loader = dataloaders
-    
+    else:
+        train_loader = dataloaders[0]
     model_n_genes = rna.shape[1]
     model_n_samples = rna.shape[0]
     model_train_gene_ko = None
@@ -331,6 +357,8 @@ model_early_stopping_p_mode = True
 model_x_distribution = "Multinomial"
 model_x_distribution_kwargs = {}
 model_mask = get_diagonal_mask(n_genes=model_n_genes, device=model_device)
+if use_hard_mask:
+    model_mask=torch.Tensor(hard_mask)
 model_use_encoder = False
 model_gt_beta = beta
 
@@ -490,7 +518,10 @@ if model.use_latents and n_epochs_pretrain_latents > 0:
     print("PRETRAINING LATENTS!")
     start_time = time.time()
     model.train_only_likelihood = True # TODO: create alternative option for pretraining
-    pretrainer.fit(model, train_loader, validation_loader)
+    if validation_size>0:
+        pretrainer.fit(model, train_loader, validation_loader)
+    else:
+            pretrainer.fit(model, train_loader)
     end_time = time.time()
     model.train_only_likelihood = False
     if profile:
@@ -523,7 +554,10 @@ trainer = pl.Trainer(
 print("TRAINING THE MODEL!")
 
 start_time = time.time()
-trainer.fit(model, train_loader, validation_loader)
+if validation_size>0:
+    trainer.fit(model, train_loader, validation_loader)
+else:
+    trainer.fit(model, train_loader)
 end_time = time.time()
 
 training_time = float(end_time - start_time)
