@@ -163,4 +163,5 @@ cython_debug/
 **/*.png
 
 notebooks/experiments/bottleneck/data/*
+notebooks/experiments/masking/data/*
 notebooks/experiments/bottleneck/sandbox.ipynb
