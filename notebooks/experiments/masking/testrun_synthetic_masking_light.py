@@ -19,7 +19,6 @@ import scanpy as sc
 
 from evaluate import format_data
 
-from model import BICYCLE
 from data import create_data, create_loaders, get_diagonal_mask
 from bicycle.utils.general import get_id
 from bicycle.utils.plotting import plot_training_results
@@ -53,6 +52,7 @@ argparser.add_argument("--parameter_set", type=str)
 argparser.add_argument("--masking", action="store_true")
 argparser.add_argument("--masking_mode", choices=["init", "loss"], type=str)
 argparser.add_argument("--DATA_PATH", type=str)
+argparser.add_argument("--trad_loading", action="store_true")
 
 
 
@@ -67,7 +67,7 @@ monitor_stats = False
 profile = False
 CHECKPOINTING = False
 progressbar_rate = 0
-compile = True
+compile = False
 compiler_kwargs = {}
 compiler_fullgraph = False
 compiler_dynamic = False
@@ -78,6 +78,7 @@ matmul_precision="high"
 masking = False
 masking_mode = "init"
 parameter_set = "params5"
+trad_loading=False
 DATA_PATH = Path("/data/toulouse/bicycle/notebooks/experiments/masking/data")
 create_new_data = False
 if args.seed:
@@ -127,6 +128,12 @@ if args.masking:
 if args.masking_mode:
     masking_mode = args.masking_mode
 
+if args.trad_loading:
+    trad_loading=args.trad_loading
+    from bicycle.model import BICYCLE
+else:
+    from model import BICYCLE
+
 if args.DATA_PATH:
     DATA_PATH= args.DATA_PATH
 if args.create_new_data:
@@ -174,6 +181,8 @@ PLOTS_PATH = OUT_PATH.joinpath("plots", run_id)
 print(f"Output paths are: {str(MODELS_PATH)} and {str(PLOTS_PATH)}!")
 
 validation_size = 0.2
+if not trad_loading:
+    validation_size=0
 batch_size = int(10000//scale_factor + 10000//scale_factor % 2)
 data_device=torch.device("cpu")
 
@@ -287,6 +296,7 @@ else:
         seed=SEED,
         num_workers=loader_workers,
         persistent_workers=False,
+        traditional=trad_loading
         )
     mask = np.concatenate([mask, np.zeros((len(mask), len(mask)-mask.shape[1]))], axis=1)
     if validation_size>0:

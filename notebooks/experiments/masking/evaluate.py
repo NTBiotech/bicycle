@@ -2,11 +2,9 @@ import pandas as pd
 from pathlib import Path
 import numpy as np
 import scipy.stats as stats
-import pickle
 import anndata
 import torch
 from sklearn.model_selection import train_test_split
-import torch.utils
 from torch.utils.data import TensorDataset, DataLoader
 
 def above_threshold(matrix:np.array, percentile : int = 50, threshold : int = None):
@@ -136,6 +134,7 @@ def format_data(
         seed = 0,
         num_workers = 1,
         persistent_workers=False,
+        traditional:bool=False,
         ):
     """Function to create data loaders for bicycle.
     Args:
@@ -169,27 +168,63 @@ def format_data(
     samples = torch.Tensor(np.array(rna.X),)
     index = torch.arange(0, len(rna.obs_names))
 
-    # create datasets
-    datasets = [TensorDataset(
-        samples,
-        torch.Tensor(sim_regime,),
-        index
-    )]
+    if not traditional:
+        # create datasets
+        datasets = [TensorDataset(
+            samples,
+            torch.Tensor(sim_regime,),
+            index
+        )]
 
-    if validation_size >0:
-        train_index, val_index = train_test_split(
+        if validation_size >0:
+            train_index, val_index = train_test_split(
+                index,
+                test_size=validation_size,
+                random_state=seed,
+                shuffle=True,
+                stratify=sim_regime
+            )
+            datasets.append(TensorDataset(
+                samples[val_index],
+                sim_regime[val_index],
+                val_index
+            ))
+    else:
+        
+        if validation_size > 0:
+
+            train_index, val_index = train_test_split(
+                index,
+                test_size=validation_size,
+                random_state=seed,
+                shuffle=True,
+                stratify=sim_regime
+            )
+            datasets = [TensorDataset(
+                torch.cat((samples[train_index],
+                          samples[val_index]), dim=0),
+                torch.cat((sim_regime[train_index],
+                          sim_regime[val_index]), dim=0),
+                torch.cat((train_index,
+                          val_index), dim=0),
+                torch.cat((torch.zeros(train_index.shape[0]),
+                          torch.ones(val_index.shape[0])), dim=0),
+            )]
+
+            datasets.append(TensorDataset(
+                samples[val_index],
+                sim_regime[val_index],
+                val_index,
+                torch.ones(val_index.shape[0])
+            ))
+
+        else:
+            datasets = [TensorDataset(
+            samples,
+            torch.Tensor(sim_regime),
             index,
-            test_size=validation_size,
-            random_state=seed,
-            shuffle=True,
-            stratify=sim_regime
-        )
-        datasets.append(TensorDataset(
-            samples[val_index],
-            sim_regime[val_index],
-            val_index
-        ))
-    
+            np.zeros(index.shape[0])
+        )]
     # create dataloaders
     dataloaders = [DataLoader(
         dataset=dataset,
@@ -202,4 +237,3 @@ def format_data(
         ) for dataset in datasets]
 
     return dataloaders, gt_interv, sim_regime, mask
-
