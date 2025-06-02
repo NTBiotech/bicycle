@@ -967,7 +967,7 @@ class BICYCLE(pl.LightningModule):
         else:
             loss_lyapunov = None
 
-        # Sparsity Loss
+        # Sparsity Loss / L1 regularization
         # FIXME: Maybe we should not use the mask here?
         if self.mask is None:
             if self.n_factors == 0:

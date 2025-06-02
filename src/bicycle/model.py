@@ -229,6 +229,8 @@ class BICYCLE(pl.LightningModule):
         train_only_likelihood: bool = False,
         train_only_latents: bool = False,
         mask_genes: list = [],
+        bayes_prior: torch.Tensor = None,
+        scale_mask: float = 0.0,
     ):
         """
         Initializes the Bicycle model as a subclass of pl.LightningModule.
@@ -264,7 +266,8 @@ class BICYCLE(pl.LightningModule):
             sigma_min (float): Minimum sigma in Ornstein-Uhlenbeck process.
             train_only_likelihood (bool): Train exclusively with NLL loss if True.
             train_only_latents (bool): Optimize only latent scale/location parameters if True.
-
+            loss_mask (torch.Tensor): Mask to be used as prior in the bayesian loss.
+            scale_mask (float): Scaling factor for bayesian loss
         """
         super().__init__()
 
@@ -297,7 +300,7 @@ class BICYCLE(pl.LightningModule):
         self.train_only_likelihood = train_only_likelihood
         self.train_only_latents = train_only_latents
         self.mask_genes = mask_genes
-
+        self.bayes_prior = bayes_prior
         self.nll_mask = torch.ones(self.n_genes,
                                    device=gt_interv.device,
                                    dtype=torch.bool)
@@ -326,6 +329,7 @@ class BICYCLE(pl.LightningModule):
         self.scale_spectral = scale_spectral
         self.scale_lyapunov = scale_lyapunov
         self.scale_kl = scale_kl
+        self.scale_mask = scale_mask
         self._normalisation_computed = False
 
         if x_distribution is not None:
@@ -699,7 +703,7 @@ class BICYCLE(pl.LightningModule):
 
     #     self._normalisation_computed = True
 
-    def scale_losses(self, z_kl, l1_loss, loss_spectral=None, loss_lyapunov=None):
+    def scale_losses(self, z_kl, l1_loss, loss_spectral=None, loss_lyapunov=None, loss_mask=None):
         """Scales the loss outputs in the training_step."""
         l1_loss = self.scale_l1 * l1_loss
         z_kl = self.scale_kl * z_kl
@@ -708,8 +712,9 @@ class BICYCLE(pl.LightningModule):
             loss_spectral = self.scale_spectral * loss_spectral
         if loss_lyapunov:
             loss_lyapunov = self.scale_lyapunov * loss_lyapunov
-
-        return z_kl, l1_loss, loss_spectral, loss_lyapunov
+        if loss_mask:
+            loss_mask = self.scale_mask * loss_mask
+        return z_kl, l1_loss, loss_spectral, loss_lyapunov, loss_mask
 
     def split_samples(self, samples, sim_regime, sample_idx, data_category):
         """Splits samples according to data_category."""
@@ -909,6 +914,10 @@ class BICYCLE(pl.LightningModule):
         spectral_loss = torch.clip(real_eigval_max_c, min=-0.01).mean()
         return spectral_loss
 
+    def compute_mask_diff(self):
+        diff = self.beta - self.bayes_prior
+        return torch.linalg.matrix_norm(diff, p=2)
+
     def training_step(self, batch, batch_idx):
         kwargs = {"on_step": False, "on_epoch": True}
         # check for multiple gpu usage
@@ -971,8 +980,10 @@ class BICYCLE(pl.LightningModule):
         else:
             loss_lyapunov = None
 
+
         # Sparsity Loss
         # FIXME: Maybe we should not use the mask here?
+        loss_mask = None
         if self.mask is None:
             if self.n_factors == 0:
                 loss_l1 = torch.abs(self.beta).mean()
@@ -980,6 +991,9 @@ class BICYCLE(pl.LightningModule):
                 loss_l1 = 0.5 * (
                     torch.abs(self.gene2factor).mean() + torch.abs(self.factor2gene).mean()
                     )
+            if self.training and self.scale_mask>0:
+                loss_mask = torch.linalg.matrix_norm(torch.sub(self.beta, self.bayes_prior, ),ord = "fro", dim = (-1,-2)).mean()
+
         else:
             if self.n_factors == 0:
                 loss_l1 = torch.abs(self.beta_val).mean()
@@ -987,6 +1001,8 @@ class BICYCLE(pl.LightningModule):
                 raise NotImplementedError(
                     "Combination of factorization and masking not implemented yet."
                     )
+            if self.training and self.scale_mask>0:
+                loss_mask = torch.linalg.matrix_norm(torch.sub(self.beta_val, self.bayes_prior, ), p=2).mean()
 
         # In case we face valid or test data,
         # we have to detach some parameters that must not get an update
@@ -1128,8 +1144,8 @@ class BICYCLE(pl.LightningModule):
             neg_log_likelihood = neg_log_likelihood / self.n_genes
 
         # Scale losses
-        z_kl, loss_l1, loss_spectral, loss_lyapunov = self.scale_losses(
-            z_kl, loss_l1, loss_spectral, loss_lyapunov
+        z_kl, loss_l1, loss_spectral, loss_lyapunov, loss_mask = self.scale_losses(
+            z_kl, loss_l1, loss_spectral, loss_lyapunov, loss_mask
         )
 
         loss = neg_log_likelihood + loss_l1 + z_kl
@@ -1138,6 +1154,8 @@ class BICYCLE(pl.LightningModule):
                 loss += loss_spectral
             if self.scale_lyapunov > 0:
                 loss += loss_lyapunov
+            if self.scale_mask > 0:
+                loss += loss_mask
 
         self.log(f"{prefix}_loss", loss, **kwargs)
         self.log(f"{prefix}_l1", loss_l1, **kwargs)
@@ -1147,6 +1165,8 @@ class BICYCLE(pl.LightningModule):
                 self.log(f"{prefix}_spectral_loss", torch.abs(loss_spectral), **kwargs)
             if self.scale_lyapunov > 0:
                 self.log(f"{prefix}_lyapunov", loss_lyapunov, **kwargs)
+            if self.scale_mask>0:
+                self.log(f"{prefix}_mask_loss",loss_mask, **kwargs )
         else:
             if self.early_stopping:
                 self.validation_step_outputs.append(loss)

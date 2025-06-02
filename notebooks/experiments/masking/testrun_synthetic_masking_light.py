@@ -17,7 +17,7 @@ from pytorch_lightning.profilers import AdvancedProfiler
 from pytorch_lightning.loggers import Logger, CSVLogger
 import scanpy as sc
 
-from evaluate import format_data
+from evaluate import format_data, add_noise
 
 from data import create_data, create_loaders, get_diagonal_mask
 from bicycle.utils.general import get_id
@@ -55,6 +55,7 @@ argparser.add_argument("--use_hard_mask", action="store_true")
 argparser.add_argument("--masking_mode", choices=["init", "loss"], type=str)
 argparser.add_argument("--DATA_PATH", type=str)
 argparser.add_argument("--trad_loading", action="store_true")
+argparser.add_argument("--scale_mask", type=float, help="Scaling factor masking loss")
 
 
 
@@ -78,10 +79,13 @@ loader_workers=5
 trainer_precision=32
 matmul_precision="high"
 masking = False
-masking_mode = "init"
+masking_mode = "loss"
 use_hard_mask = False
+masking_loss=True
+scale_mask = 1.0
+
 parameter_set = "params5"
-trad_loading=False
+trad_loading=True
 DATA_PATH = Path("/data/toulouse/bicycle/notebooks/experiments/masking/data")
 create_new_data = False
 if args.seed:
@@ -130,11 +134,15 @@ if args.masking:
     masking = args.masking
 if args.masking_mode:
     masking_mode = args.masking_mode
+    masking_loss = masking_mode == "loss"
 if args.use_hard_mask:
     use_hard_mask = args.use_hard_mask
+if masking_loss:
+    scale_mask= args.scale_mask
 
 if args.trad_loading:
     trad_loading=args.trad_loading
+if trad_loading:
     from bicycle.model import BICYCLE
 else:
     from model import BICYCLE
@@ -188,7 +196,7 @@ print(f"Output paths are: {str(MODELS_PATH)} and {str(PLOTS_PATH)}!")
 validation_size = 0.2
 if not trad_loading:
     validation_size=0
-batch_size = int(10000//scale_factor + 10000//scale_factor % 2)
+batch_size = 5000
 data_device=torch.device("cpu")
 
 if create_new_data:
@@ -305,9 +313,9 @@ else:
         # limit self interactions
         hard_mask*=np.diag(np.zeros(hard_mask.shape[0]))
 
-    
-    
-    
+    if masking_loss:
+        grn_noise = 1
+        bayes_prior = torch.tensor(add_noise(beta, mean=1, std=grn_noise))
 
     # get dataloaders
     dataloaders, gt_interv, sim_regime, mask = format_data(
@@ -324,7 +332,8 @@ else:
         persistent_workers=False,
         traditional=trad_loading
         )
-    mask = np.concatenate([mask, np.zeros((len(mask), len(mask)-mask.shape[1]))], axis=1)
+    mask = np.concatenate([mask, np.zeros((len(mask), len(mask)-mask.shape[1]))], axis=1).T
+
     if validation_size>0:
         train_loader,validation_loader = dataloaders
     else:
@@ -333,7 +342,10 @@ else:
     model_n_samples = rna.shape[0]
     model_train_gene_ko = None
     model_test_gene_ko = None
-    model_init_tensors = {"beta" : mask}
+    if masking_mode == "init":
+        model_init_tensors = {"beta" : mask}
+    else:
+        model_init_tensors = {}
 
 
 # initialize parameters for the bicycle class with prefix model
@@ -346,7 +358,6 @@ model_rank_w_cov_factor = model_n_genes
 model_optimizer = "adam"
 # Faster decay for estimates of gradient and gradient squared:
 model_optimizer_kwargs = {"betas": [0.5, 0.9]}
-model_device = torch.device(f"cuda:{GPU_DEVICES[0]}")
 model_scale_l1 = 0.1
 model_scale_spectral = 1.0
 model_scale_lyapunov = 1.0
@@ -357,9 +368,13 @@ model_early_stopping_patience = 500
 model_early_stopping_p_mode = True
 model_x_distribution = "Multinomial"
 model_x_distribution_kwargs = {}
+model_device = torch.device(f"cuda:{GPU_DEVICES[0]}")
+
 model_mask = get_diagonal_mask(n_genes=model_n_genes, device=model_device)
 if use_hard_mask:
-    model_mask=torch.Tensor(hard_mask)
+    model_mask=torch.tensor(hard_mask, device=model_device)
+elif masking_loss:
+    model_mask = None
 model_use_encoder = False
 model_gt_beta = beta
 
@@ -416,8 +431,12 @@ if trad_loading:
         train_only_likelihood = model_train_only_likelihood,
         train_only_latents = model_train_only_latents,
         mask_genes = model_mask_genes,
+        bayes_prior=None if not masking_loss else bayes_prior.to(model_device),
+        scale_mask=0 if not masking_loss else scale_mask,
     )
 else:
+    if masking_loss:
+        raise NotImplementedError("Masking loss and not trad_loading not implemented yet!")
     model = BICYCLE(
         lr = model_lr,
         gt_interv = model_gt_interv,
@@ -463,7 +482,7 @@ model.to(model_device)
 
 
 # training variables
-n_epochs = int(51000//scale_factor + 51000//scale_factor % 2)
+n_epochs = 10000
 gradient_clip_val = 1.0
 plot_epoch_callback = 500 # intervall for plot_training_results -> GenerateCallback
 
@@ -518,8 +537,8 @@ if CHECKPOINTING:
 
 
 # pretraining
-n_epochs_pretrain_latents = int(10000//scale_factor + 10000//scale_factor % 2 if not scale_factor is None else 1000
-)
+n_epochs_pretrain_latents = 1000
+
 if model.use_latents and n_epochs_pretrain_latents > 0:
     print(f"Pretraining model latents for {n_epochs_pretrain_latents} epochs...")
     pretrain_callbacks = []
