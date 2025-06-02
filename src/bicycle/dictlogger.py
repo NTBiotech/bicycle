@@ -34,7 +34,7 @@ class DictLogger(Logger):
 
     @rank_zero_only
     def log_hyperparams(self, params: Namespace):
-        self.hyperparams = vars(params)
+        self.hyperparams = params
 
     @rank_zero_only
     def log_metrics(self, metrics: dict[str, float], step: int):
