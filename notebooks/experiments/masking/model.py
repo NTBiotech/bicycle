@@ -203,10 +203,7 @@ class BICYCLE(pl.LightningModule):
         optimizer="adam",
         optimizer_kwargs: dict = {},
         device="cuda",
-        scale_l1=1.0,
-        scale_spectral=1.0,
-        scale_lyapunov=1.0,
-        scale_kl=1.0,
+        loss_scale:torch.Tensor = torch.ones(4),
         early_stopping: bool = True,
         early_stopping_min_delta: float = 0.5,
         early_stopping_patience: int = 100,
@@ -229,6 +226,7 @@ class BICYCLE(pl.LightningModule):
         train_only_likelihood: bool = False,
         train_only_latents: bool = False,
         mask_genes: list = [],
+        norm_scale:bool = True
     ):
         """
         Initializes the Bicycle model as a subclass of pl.LightningModule.
@@ -245,9 +243,8 @@ class BICYCLE(pl.LightningModule):
                 Dimensions: (batch, n_genes, rank_omega_cov_factor).
             optimizer (str): Optimizer to use. Options: "adam", "rmsprop", "adamlrs".
             optimizer_kwargs (dict): Keyword arguments for the selected optimizer.
-            scale_l1 (float): Scaling factor for L1 loss component.
-            scale_spectral (float): Scaling factor for spectral loss component.
-            scale_lyapunov (float): Scaling factor for Lyapunov loss component.
+            loss_scale (torch.Tensor): Scale vector to scale losses by,
+                (scale_l1, scale_spectral, scale_lyapunov, scale_kl).
             x_distribution (str): Distribution for NLL loss. Supported options: 
                 "Poisson", "Normal", "NormalNormal", "Multinomial".
             init_tensors (dict): Initial values for model parameters. Valid keys: 
@@ -265,6 +262,7 @@ class BICYCLE(pl.LightningModule):
             sigma_min (float): Minimum sigma in Ornstein-Uhlenbeck process.
             train_only_likelihood (bool): Train exclusively with NLL loss if True.
             train_only_latents (bool): Optimize only latent scale/location parameters if True.
+            norm_scale (bool): Normalize scale values before scaling loss function.
         
             Notes:
             - DataLoaders for training this class have to contain:
@@ -304,6 +302,7 @@ class BICYCLE(pl.LightningModule):
         self.train_only_likelihood = train_only_likelihood
         self.train_only_latents = train_only_latents
         self.mask_genes = mask_genes
+        self.norm_scale = norm_scale
 
         self.nll_mask = torch.ones(self.n_genes,
                                    device=gt_interv.device,
@@ -329,10 +328,8 @@ class BICYCLE(pl.LightningModule):
                     torch.zeros((self.n_samples, n_genes))
                 )
 
-        self.scale_l1 = scale_l1
-        self.scale_spectral = scale_spectral
-        self.scale_lyapunov = scale_lyapunov
-        self.scale_kl = scale_kl
+        self.scale_l1, self.scale_spectral, self.scale_lyapunov, self.scale_kl = loss_scale #unpack for backward compatability
+        self.loss_scale = loss_scale
         self._normalisation_computed = False
 
         if x_distribution is not None:
@@ -718,6 +715,17 @@ class BICYCLE(pl.LightningModule):
             loss_lyapunov = self.scale_lyapunov * loss_lyapunov
 
         return z_kl, l1_loss, loss_spectral, loss_lyapunov
+    
+    def scale_advanced(self, losses:torch.Tensor, scaling:torch.Tensor):
+        """Normalizes scale and scales losses accordingly."""
+        if len(losses) != len(scaling):
+            print("Scaling vector does not match up with loss vector!!\n" \
+            "Scaling by one...")
+            return losses
+        scaling /= scaling.sum()
+        losses *= scaling
+        return losses
+        
 
     def split_samples(self, samples, sim_regime, sample_idx, data_category):
         """Splits samples according to data_category."""
@@ -943,9 +951,7 @@ class BICYCLE(pl.LightningModule):
             sigmas = sigmas.detach()
             self.T = self.T.detach()
 
-        #
         # Losses
-        
         
         # Spectral Loss (only for training data)
         if self.training & (self.scale_spectral > 0):
@@ -1040,9 +1046,13 @@ class BICYCLE(pl.LightningModule):
             neg_log_likelihood = neg_log_likelihood / self.n_genes
 
         # Scale losses
-        z_kl, loss_l1, loss_spectral, loss_lyapunov = self.scale_losses(
-            z_kl, loss_l1, loss_spectral, loss_lyapunov
-        )
+        if self.norm_scale:
+            z_kl, loss_l1, loss_spectral, loss_lyapunov = self.scale_advanced(
+                torch.Tensor([z_kl, loss_l1, loss_spectral, loss_lyapunov]), self.loss_scale)
+        else:
+            z_kl, loss_l1, loss_spectral, loss_lyapunov = self.scale_losses(
+                z_kl, loss_l1, loss_spectral, loss_lyapunov
+            )
 
         loss = neg_log_likelihood + loss_l1 + z_kl
         if self.training:
