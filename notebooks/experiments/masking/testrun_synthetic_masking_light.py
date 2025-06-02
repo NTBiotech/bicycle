@@ -14,7 +14,7 @@ import torch
 import pytorch_lightning as pl
 from pytorch_lightning.callbacks import StochasticWeightAveraging, DeviceStatsMonitor
 from pytorch_lightning.profilers import AdvancedProfiler
-from pytorch_lightning.loggers import Logger
+from pytorch_lightning.loggers import Logger, CSVLogger
 import scanpy as sc
 
 from evaluate import format_data
@@ -27,6 +27,7 @@ from bicycle.callbacks import (
     GenerateCallback,
     MyLoggerCallback,
 )
+from bicycle.dictlogger import DictLogger
 import pickle
 import argparse
 
@@ -377,45 +378,82 @@ model_mask_genes = []
 
 
 print("Initializing BICYCLE model...")
-model = BICYCLE(
-    lr = model_lr,
-    gt_interv = model_gt_interv,
-    n_genes = model_n_genes,
-    n_samples = model_n_samples,
-    lyapunov_penalty = model_lyapunov_penalty,
-    perfect_interventions = model_perfect_interventions,
-    rank_w_cov_factor = model_rank_w_cov_factor,
-    optimizer = model_optimizer,
-    optimizer_kwargs = model_optimizer_kwargs,
-    device = model_device,
-    scale_l1 = model_scale_l1,
-    scale_spectral = model_scale_spectral,
-    scale_lyapunov = model_scale_lyapunov,
-    scale_kl = model_scale_kl,
-    early_stopping = model_early_stopping,
-    early_stopping_min_delta = model_early_stopping_min_delta,
-    early_stopping_patience = model_early_stopping_patience,
-    early_stopping_p_mode = model_early_stopping_p_mode,
-    x_distribution = model_x_distribution,
-    x_distribution_kwargs = model_x_distribution_kwargs,
-    init_tensors = model_init_tensors,
-    mask = model_mask,
-    use_encoder = model_use_encoder,
-    gt_beta = model_gt_beta,
-    train_gene_ko = model_train_gene_ko,
-    test_gene_ko = model_test_gene_ko,
-    use_latents = model_use_latents,
-    covariates = model_covariates,
-    n_factors = model_n_factors,
-    intervention_type = model_intervention_type,
-    sigma_min = model_sigma_min,
-    T = model_T,
-    learn_T = model_learn_T,
-    train_only_likelihood = model_train_only_likelihood,
-    train_only_latents = model_train_only_latents,
-    mask_genes = model_mask_genes,
-)
-
+if trad_loading:
+    model = BICYCLE(
+        lr = model_lr,
+        gt_interv = model_gt_interv,
+        n_genes = model_n_genes,
+        n_samples = model_n_samples,
+        lyapunov_penalty = model_lyapunov_penalty,
+        perfect_interventions = model_perfect_interventions,
+        rank_w_cov_factor = model_rank_w_cov_factor,
+        optimizer = model_optimizer,
+        optimizer_kwargs = model_optimizer_kwargs,
+        device = model_device,
+        scale_l1 = model_scale_l1,
+        scale_spectral = model_scale_spectral,
+        scale_lyapunov = model_scale_lyapunov,
+        scale_kl = model_scale_kl,
+        early_stopping = model_early_stopping,
+        early_stopping_min_delta = model_early_stopping_min_delta,
+        early_stopping_patience = model_early_stopping_patience,
+        early_stopping_p_mode = model_early_stopping_p_mode,
+        x_distribution = model_x_distribution,
+        x_distribution_kwargs = model_x_distribution_kwargs,
+        init_tensors = model_init_tensors,
+        mask = model_mask,
+        use_encoder = model_use_encoder,
+        gt_beta = model_gt_beta,
+        train_gene_ko = model_train_gene_ko,
+        test_gene_ko = model_test_gene_ko,
+        use_latents = model_use_latents,
+        covariates = model_covariates,
+        n_factors = model_n_factors,
+        intervention_type = model_intervention_type,
+        sigma_min = model_sigma_min,
+        T = model_T,
+        learn_T = model_learn_T,
+        train_only_likelihood = model_train_only_likelihood,
+        train_only_latents = model_train_only_latents,
+        mask_genes = model_mask_genes,
+    )
+else:
+    model = BICYCLE(
+        lr = model_lr,
+        gt_interv = model_gt_interv,
+        n_genes = model_n_genes,
+        n_samples = model_n_samples,
+        lyapunov_penalty = model_lyapunov_penalty,
+        perfect_interventions = model_perfect_interventions,
+        rank_w_cov_factor = model_rank_w_cov_factor,
+        optimizer = model_optimizer,
+        optimizer_kwargs = model_optimizer_kwargs,
+        device = model_device,
+        loss_scale = torch.Tensor([model_scale_l1, model_scale_spectral, model_scale_lyapunov, model_scale_kl]),
+        early_stopping = model_early_stopping,
+        early_stopping_min_delta = model_early_stopping_min_delta,
+        early_stopping_patience = model_early_stopping_patience,
+        early_stopping_p_mode = model_early_stopping_p_mode,
+        x_distribution = model_x_distribution,
+        x_distribution_kwargs = model_x_distribution_kwargs,
+        init_tensors = model_init_tensors,
+        mask = model_mask,
+        use_encoder = model_use_encoder,
+        gt_beta = model_gt_beta,
+        train_gene_ko = model_train_gene_ko,
+        test_gene_ko = model_test_gene_ko,
+        use_latents = model_use_latents,
+        covariates = model_covariates,
+        n_factors = model_n_factors,
+        intervention_type = model_intervention_type,
+        sigma_min = model_sigma_min,
+        T = model_T,
+        learn_T = model_learn_T,
+        train_only_likelihood = model_train_only_likelihood,
+        train_only_latents = model_train_only_latents,
+        mask_genes = model_mask_genes,
+        norm_scale = True
+    )
 if compile:
     torch.compile(model=model, 
         fullgraph = compiler_fullgraph,
@@ -435,7 +473,7 @@ if validation_size > 0:
     print(f"- Number of validation samples: {len(validation_loader.dataset)}")
 
 # callback variables
-swa = 250
+swa = 0
 VERBOSE_CHECKPOINTING = False
 check_val_every_n_epoch = 1
 log_every_n_steps = 1
@@ -446,7 +484,9 @@ if profile:
     profiler = AdvancedProfiler(dirpath=MODELS_PATH.joinpath("profiler"), filename="profile")
 
 # initialize logger for the Trainer class
-loggers = None
+#if not (MODELS_PATH/"logs").exists():
+#    (MODELS_PATH/"logs").mkdir(parents=True)
+loggers = DictLogger()
 
 # initialize training callbacks
 MODELS_PATH.joinpath("generatecallback").mkdir(parents=True, exist_ok=True)
@@ -478,7 +518,7 @@ if CHECKPOINTING:
 
 
 # pretraining
-n_epochs_pretrain_latents = int(10000//scale_factor + 10000//scale_factor % 2
+n_epochs_pretrain_latents = int(10000//scale_factor + 10000//scale_factor % 2 if not scale_factor is None else 1000
 )
 if model.use_latents and n_epochs_pretrain_latents > 0:
     print(f"Pretraining model latents for {n_epochs_pretrain_latents} epochs...")
