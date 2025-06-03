@@ -315,7 +315,11 @@ else:
 
     if masking_loss:
         grn_noise = 1
-        bayes_prior = torch.tensor(add_noise(beta, mean=1, std=grn_noise))
+        bayes_prior = add_noise(grn, mean=1, std=grn_noise)
+        bayes_prior = torch.tensor(np.concatenate([bayes_prior,
+                                                   np.zeros((len(bayes_prior),
+                                                             len(bayes_prior)-bayes_prior.shape[1]))],
+                                                   axis=1).T)
 
     # get dataloaders
     dataloaders, gt_interv, sim_regime, mask = format_data(
@@ -482,7 +486,7 @@ model.to(model_device)
 
 
 # training variables
-n_epochs = 10000
+n_epochs = 20000
 gradient_clip_val = 1.0
 plot_epoch_callback = 500 # intervall for plot_training_results -> GenerateCallback
 
