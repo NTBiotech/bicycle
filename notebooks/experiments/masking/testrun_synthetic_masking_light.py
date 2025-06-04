@@ -36,7 +36,7 @@ import argparse
 argparser = argparse.ArgumentParser()
 argparser.add_argument("--seed", type=int, help="Random seed for reproducibility")
 argparser.add_argument("--create_new_data", action="store_true")
-argparser.add_argument("--scale_factor", type=float, help="Scaling factor for parameters")
+#argparser.add_argument("--scale_factor", type=float, help="Scaling factor for parameters") Deprecated!
 argparser.add_argument("--GPU", type=int, help="GPU device ID to use")
 argparser.add_argument("--monitor_stats", action="store_true")
 argparser.add_argument("--profile", action="store_true")
@@ -50,9 +50,7 @@ argparser.add_argument("--loader_workers", type=int)
 argparser.add_argument("--trainer_precision", choices=[64, 32, 16], type=int)
 argparser.add_argument("--matmul_precision", choices=["high","highest","medium"], type=str)
 argparser.add_argument("--parameter_set", type=str)
-argparser.add_argument("--masking", action="store_true")
-argparser.add_argument("--use_hard_mask", action="store_true")
-argparser.add_argument("--masking_mode", choices=["init", "loss"], type=str)
+argparser.add_argument("--masking_mode", choices=["init", "loss", "hard"], type=str)
 argparser.add_argument("--DATA_PATH", type=str)
 argparser.add_argument("--trad_loading", action="store_true")
 argparser.add_argument("--scale_mask", type=float, help="Scaling factor masking loss")
@@ -79,20 +77,20 @@ loader_workers=5
 trainer_precision=32
 matmul_precision="high"
 masking = False
-masking_mode = "loss"
+masking_mode = None
 use_hard_mask = False
-masking_loss=True
-scale_mask = 1.0
+masking_loss=False
+scale_mask = 0
 
 parameter_set = "params5"
-trad_loading=True
+trad_loading=False
 DATA_PATH = Path("/data/toulouse/bicycle/notebooks/experiments/masking/data")
 create_new_data = False
 if args.seed:
     SEED = args.seed
 
-if args.scale_factor:
-    scale_factor = args.scale_factor
+#if args.scale_factor:
+#    scale_factor = args.scale_factor
 
 if args.GPU:
     GPU_DEVICES = [args.GPU]
@@ -130,13 +128,11 @@ if args.matmul_precision:
 if args.parameter_set:
     parameter_set = args.parameter_set
 
-if args.masking:
-    masking = args.masking
 if args.masking_mode:
     masking_mode = args.masking_mode
     masking_loss = masking_mode == "loss"
-if args.use_hard_mask:
-    use_hard_mask = args.use_hard_mask
+    use_hard_mask = masking_mode == "hard"
+
 if masking_loss:
     scale_mask= args.scale_mask
 
@@ -301,7 +297,7 @@ else:
             beta[n] = np.zeros(grn.shape[0])
     if use_hard_mask:
         # create hard mask to limit interactions
-        possible_interactions = np.absolute(region_to_gene.T @ region_to_tf)>=1
+        possible_interactions = np.absolute(region_to_gene.T @ region_to_tf)>0
         possible_interactions=pd.DataFrame(possible_interactions, columns=TFs, index=grn.index)
         # pad with non tf genes and transpose
         hard_mask = np.empty((possible_interactions.shape[0], possible_interactions.shape[0]))
@@ -315,16 +311,21 @@ else:
 
     if masking_loss:
         grn_noise = 1
-        bayes_prior = add_noise(grn, mean=1, std=grn_noise)
-        bayes_prior = torch.tensor(np.concatenate([bayes_prior,
-                                                   np.zeros((len(bayes_prior),
-                                                             len(bayes_prior)-bayes_prior.shape[1]))],
-                                                   axis=1).T)
+        noised_grn = grn + np.random.normal(loc=0, scale=grn_noise, size=grn.shape)
+        # pad and transpose
+        bayes_prior = np.empty((grn.shape[0], grn.shape[0]))
+        for n, (gene_name, row) in enumerate(noised_grn.iterrows()):
+            if str(gene_name) in TFs:
+                bayes_prior[n] = noised_grn[str(gene_name)]
+            else:
+                bayes_prior[n] = np.zeros(grn.shape[0])
 
     # get dataloaders
     dataloaders, gt_interv, sim_regime, mask = format_data(
         rna=rna,
         atac=atac,
+        gene_names=grn.index.to_list(),
+        TFs=TFs,
         region_to_gene=region_to_gene,
         region_to_tf=region_to_tf,
         masking_parameters=masking_parameters,
@@ -336,7 +337,6 @@ else:
         persistent_workers=False,
         traditional=trad_loading
         )
-    mask = np.concatenate([mask, np.zeros((len(mask), len(mask)-mask.shape[1]))], axis=1).T
 
     if validation_size>0:
         train_loader,validation_loader = dataloaders

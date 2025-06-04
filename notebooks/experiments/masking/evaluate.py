@@ -14,7 +14,6 @@ def above_threshold(matrix:np.array, percentile : int = 50, threshold : int = No
 
 def normalize_matrix(df: np.array):
     if type(df) == np.ndarray:
-        print("np.array")
         return df/sum(df)
     else:
         return df/df.sum().sum()
@@ -27,8 +26,8 @@ def distance(x1:np.array, x2: np.array):
 def get_sparsity(mtx:np.ndarray):
     return np.count_nonzero(mtx)/np.prod(mtx.shape)
 
-def add_noise(mtx:np.ndarray, mean=1, std=0.1):
-    return mtx * np.random.normal(loc=mean, scale=std, size=mtx.shape)
+def add_noise(mtx:np.ndarray, mean=0, std=0.1):
+    return mtx + np.random.normal(loc=mean, scale=std, size=mtx.shape)
 
 def add_saltpepper(mtx:np.ndarray, p, min=None, max=None):
     if max is None:
@@ -36,7 +35,7 @@ def add_saltpepper(mtx:np.ndarray, p, min=None, max=None):
     if min is None:
         min = np.min(mtx)
     indexes = np.random.rand(*mtx.shape)<p
-    mtx[indexes] = np.random.choice([min, max], p=[0.5, 0.5], size=np.sum(indexes))
+    mtx[indexes] = np.random.choice([min, max], p=[0.8, 0.2], size=np.sum(indexes))
     return mtx
 
 def get_random_samples(n_samples, model: np.ndarray):
@@ -53,26 +52,47 @@ def get_random_samples(n_samples, model: np.ndarray):
     random_samples[binary] = values
     return random_samples
 
-def evaluate_model(grn: np.array, atac: np.array, get_mask, funct_params: dict):
-    """Evaluate the get_mask function based on the distance of its output to the grn."""
-    mask = get_mask(atac, **funct_params)
+def evaluate_model(grn: np.array, atac: np.array,region_to_gene:np.ndarray, region_to_tf:np.ndarray, get_mask:np.ndarray, funct_params: dict, runtime:float = None, n_samples: int=1000, complicated = True, random_samples:np.ndarray = np.array([]), random_distances:np.ndarray = None):
+    """
+    Evaluate the get_mask function based on the distance of its output to the grn.
+    Compared to random atac with matching sparsity and count distribution.
+    
+    Args:
+    runtime(float): Time in minutes, this function should be running for.
+    """
+
+    mask = get_mask(atac, region_to_gene, region_to_tf, **funct_params)
     mask_distance = distance(grn, mask)
+
     # distance distribution when atac is random
-    max = np.max(atac)
-    size = atac.shape
-    n_samples = 10000
-    rand_distances = []
-    rand_atac = np.random.normal(0, max, size=(n_samples,)+size)
+    if random_distances is None:
+        sparsity = get_sparsity(grn)
+        print(f"Sparsity: {sparsity}")
+        if len(random_samples)>0:
+            assert random_samples[0].shape == grn.shape, "Shape of random_samples not compatilble with atac matrix!"
+            n_samples = len(random_samples)
 
-    for atac in rand_atac:
-        mask = get_mask(mask, **funct_params)
-        rand_distances.append(distance(grn, mask))
+        elif complicated:
+            random_samples = get_random_samples(n_samples=n_samples, model=atac)
+        else:
+            random_samples = np.random.binomial(1, sparsity, size=(n_samples,)+atac.shape)
 
-    p_value = stats.percentileofscore(rand_distances, mask_distance)
+        time_per_getmask = timeit.timeit("get_mask(atac, region_to_gene, region_to_tf, **funct_params)", number=1, globals=locals())
+        if runtime:
+            runtime/=60
+            n_samples = runtime//time_per_getmask
+
+        print(f"Running model {n_samples} times to determine the random distribution.\nThis will take {time_per_getmask*n_samples /60} minutes.")
+        random_distances = np.empty(n_samples)
+        for n, rand in enumerate(random_samples):
+            mask = get_mask(rand, region_to_gene, region_to_tf, **funct_params)
+            random_distances[n] = distance(grn, rand)
+
+    p_value = stats.percentileofscore(random_distances, mask_distance)
 
     print("Distance to grn: ", mask_distance)
-    print("p-value:", stats.percentileofscore(rand_distances, mask_distance))
-    return mask_distance, p_value
+    print("p-value:", stats.percentileofscore(random_distances, mask_distance))
+    return mask, mask_distance, p_value, random_distances
 
 def get_mask(atac,
              region_to_gene,
@@ -125,6 +145,8 @@ def string_to_list(string:str, to_type=int):
 def format_data(
         rna:anndata.AnnData,
         atac:anndata.AnnData,
+        gene_names: list,
+        TFs:list,
         region_to_gene,
         region_to_tf,
         masking_parameters:dict,
@@ -147,12 +169,19 @@ def format_data(
     """
     
     # creating a mask
-    atac_unp=atac.X[~atac.obs.perturbed]
-    mask = get_mask(
+    atac_unp=np.array(atac.X[~atac.obs.perturbed])
+    naked_mask = get_mask(
         atac = atac_unp.T,
         region_to_gene=region_to_gene,
         region_to_tf=region_to_tf,
         **masking_parameters,)
+    #pad and transpose the mask
+    mask = np.empty((naked_mask.shape[0], naked_mask.shape[0]))
+    for n, gene_name in enumerate(gene_names):
+        if str(gene_name) in TFs:
+            mask[n] = naked_mask[:, TFs.index(str(gene_name))]
+        else:
+            mask[n] = np.zeros(naked_mask.shape[0])
     mask = torch.Tensor(mask, device=device)
 
     contexts = (rna.obs.target_genes).unique()
