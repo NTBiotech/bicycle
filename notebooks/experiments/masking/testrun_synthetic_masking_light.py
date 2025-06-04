@@ -13,6 +13,7 @@ import pandas as pd
 import torch
 import pytorch_lightning as pl
 from pytorch_lightning.callbacks import StochasticWeightAveraging, DeviceStatsMonitor
+from pytorch_lightning.callbacks.early_stopping import EarlyStopping
 from pytorch_lightning.profilers import AdvancedProfiler
 from pytorch_lightning.loggers import Logger, CSVLogger
 import scanpy as sc
@@ -67,6 +68,7 @@ GPU_DEVICES = [0]
 monitor_stats = False
 profile = False
 CHECKPOINTING = False
+early_stopping = True
 progressbar_rate = 0
 compile = False
 compiler_kwargs = {}
@@ -540,7 +542,10 @@ if CHECKPOINTING:
     )
     MODELS_PATH.joinpath("mylogger").mkdir(parents=True, exist_ok=True)
     callbacks.append(MyLoggerCallback(dirpath=os.path.join(MODELS_PATH, "mylogger")))
-
+if early_stopping:
+    if not trad_loading:
+        raise NotImplementedError("early stopping only available for trad_loading")
+    callbacks.append(EarlyStopping(monitor="valid_loss", mode="min", patience=20))
 
 # pretraining
 n_epochs_pretrain_latents = 1000
