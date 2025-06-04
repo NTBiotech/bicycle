@@ -17,7 +17,7 @@ from pytorch_lightning.profilers import AdvancedProfiler
 from pytorch_lightning.loggers import Logger, CSVLogger
 import scanpy as sc
 
-from evaluate import format_data, add_noise
+from evaluate import format_data, add_noise, add_saltpepper, get_sparsity
 
 from data import create_data, create_loaders, get_diagonal_mask
 from bicycle.utils.general import get_id
@@ -63,7 +63,7 @@ print("Passed arguments: ",args)
 
 SEED = 1
 scale_factor = 1
-GPU_DEVICES = [1]
+GPU_DEVICES = [0]
 monitor_stats = False
 profile = False
 CHECKPOINTING = False
@@ -310,15 +310,17 @@ else:
         hard_mask*=np.diag(np.zeros(hard_mask.shape[0]))
 
     if masking_loss:
-        grn_noise = 1
-        noised_grn = grn + np.random.normal(loc=0, scale=grn_noise, size=grn.shape)
-        # pad and transpose
-        bayes_prior = np.empty((grn.shape[0], grn.shape[0]))
-        for n, (gene_name, row) in enumerate(noised_grn.iterrows()):
-            if str(gene_name) in TFs:
-                bayes_prior[n] = noised_grn[str(gene_name)]
-            else:
-                bayes_prior[n] = np.zeros(grn.shape[0])
+        grn_noise_var = np.std(beta)
+        grn_noise_mean = np.mean(beta)
+        grn_noise_p = get_sparsity(beta)*0.5
+        salt = np.random.rand(beta.shape) < grn_noise_p
+        bayes_prior = beta
+        bayes_prior[salt] = np.random.normal(loc=grn_noise_mean, scale=grn_noise_var, size=np.sum(salt))
+        normalize_mask = False
+        if normalize_mask:
+            bayes_prior = bayes_prior/np.max(bayes_prior)
+
+        bayes_prior = torch.Tensor(bayes_prior)
 
     # get dataloaders
     dataloaders, gt_interv, sim_regime, mask = format_data(
@@ -486,7 +488,7 @@ model.to(model_device)
 
 
 # training variables
-n_epochs = 20000
+n_epochs = 10000
 gradient_clip_val = 1.0
 plot_epoch_callback = 500 # intervall for plot_training_results -> GenerateCallback
 
