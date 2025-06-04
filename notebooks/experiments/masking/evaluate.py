@@ -263,6 +263,14 @@ def format_data(
         pin_memory=True,
         num_workers=num_workers,
         persistent_workers=persistent_workers,
-        ) for dataset in datasets]
+        ) if n ==0 else DataLoader(
+        dataset=dataset,
+        batch_size=batch_size,
+        shuffle=False,
+        drop_last=False,
+        pin_memory=True,
+        num_workers=num_workers,
+        persistent_workers=persistent_workers,
+        ) for n,  dataset in enumerate(datasets) ]
 
     return dataloaders, gt_interv, sim_regime, mask
