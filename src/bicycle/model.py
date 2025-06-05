@@ -304,16 +304,17 @@ class BICYCLE(pl.LightningModule):
         self.train_only_likelihood = train_only_likelihood
         self.train_only_latents = train_only_latents
         self.mask_genes = mask_genes
-        self.bayes_prior = bayes_prior
-        if self.mask:
-            self.bayes_prior = bayes_prior[mask].flatten()
         self.nll_mask = torch.ones(self.n_genes,
                                    device=gt_interv.device,
                                    dtype=torch.bool)
+        self.bayes_prior = bayes_prior
+        if self.mask:
+            self.bayes_prior = bayes_prior[mask].flatten()
         self.hamming_distance = hamming_distance
-
         if self.hamming_distance:
-            loss_mask = (loss_mask>0).to(int)
+            self.bayes_prior = (self.bayes_prior>0).to(int)
+            self.hamming = HammingDistance(task="binary").to(self.device)
+
         if len(self.mask_genes) > 0:
             for g in self.mask_genes:
                 self.nll_mask[g] = False
@@ -1003,8 +1004,7 @@ class BICYCLE(pl.LightningModule):
                     )
             if self.training and self.scale_mask>0:
                 if self.hamming_distance:
-                    hamming = HammingDistance(task="binary")
-                    loss_mask = hamming(self.beta,self.bayes_prior.repeat(self.beta.shape[0], 1,1))
+                    loss_mask = self.hamming(self.beta,self.bayes_prior)
                 else:
                     loss_mask = torch.linalg.matrix_norm(torch.sub(self.beta, self.bayes_prior, ),ord = "fro", dim = (-1,-2)).mean()
 
@@ -1017,8 +1017,7 @@ class BICYCLE(pl.LightningModule):
                     )
             if self.training and self.scale_mask>0:
                 if self.hamming_distance:
-                    hamming = HammingDistance(task="binary")
-                    loss_mask = hamming(self.beta_val,self.bayes_prior.repeat(self.beta_val.shape[0], 1,1))
+                    loss_mask = self.hamming(self.beta_val,self.bayes_prior.repeat(self.beta_val.shape[0], 1,1))
                 else:
                     loss_mask = torch.linalg.matrix_norm(torch.sub(self.beta_val, self.bayes_prior, ), p=2).mean()
 

@@ -56,7 +56,7 @@ trad_loading=True
 
 # masking
 masking_mode = "loss"
-bin_prior =False
+bin_prior =True
 scale_mask = 1
 parameter_set = "params5"
 grn_noise_factor= 0.5
@@ -77,6 +77,8 @@ n_epochs = 10000
 n_epochs_pretrain_latents = 1000
 
 
+if masking_mode != "loss" and not bin_prior:
+    raise NotImplementedError("masking mode must be loss for bin_prior")
 if trad_loading:
     from bicycle.model import BICYCLE
 else:
@@ -244,8 +246,6 @@ else:
         bayes_prior[salt] = np.random.normal(loc=grn_noise_mean, scale=grn_noise_var, size=np.sum(salt))
         if normalize_mask:
             bayes_prior = bayes_prior/np.max(bayes_prior)
-        if bin_prior:
-            bayes_prior = (bayes_prior>0).astype(int)
         bayes_prior = torch.Tensor(bayes_prior)
 
     # get dataloaders
