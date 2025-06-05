@@ -56,6 +56,7 @@ trad_loading=True
 
 # masking
 masking_mode = "loss"
+bin_prior =False
 scale_mask = 1
 parameter_set = "params5"
 grn_noise_factor= 0.5
@@ -243,7 +244,8 @@ else:
         bayes_prior[salt] = np.random.normal(loc=grn_noise_mean, scale=grn_noise_var, size=np.sum(salt))
         if normalize_mask:
             bayes_prior = bayes_prior/np.max(bayes_prior)
-
+        if bin_prior:
+            bayes_prior = (bayes_prior>0).astype(int)
         bayes_prior = torch.Tensor(bayes_prior)
 
     # get dataloaders
@@ -363,6 +365,7 @@ if trad_loading:
         mask_genes = model_mask_genes,
         bayes_prior=None if not masking_loss else bayes_prior.to(model_device),
         scale_mask=0 if not masking_loss else scale_mask,
+        hamming_distance=bin_prior
     )
 else:
     if masking_loss:

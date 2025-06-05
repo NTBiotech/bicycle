@@ -43,6 +43,7 @@ from torch import optim
 from torch import Tensor, nn
 from torch.distributions.kl import kl_divergence
 from torch.utils.data import DataLoader, TensorDataset
+from torchmetrics import HammingDistance
 
 from bicycle.utils.training import EarlyStopperTorch, lyapunov_direct
 
@@ -231,6 +232,7 @@ class BICYCLE(pl.LightningModule):
         mask_genes: list = [],
         bayes_prior: torch.Tensor = None,
         scale_mask: float = 0.0,
+        hamming_distance :bool = False
     ):
         """
         Initializes the Bicycle model as a subclass of pl.LightningModule.
@@ -268,6 +270,8 @@ class BICYCLE(pl.LightningModule):
             train_only_latents (bool): Optimize only latent scale/location parameters if True.
             loss_mask (torch.Tensor): Mask to be used as prior in the bayesian loss.
             scale_mask (float): Scaling factor for bayesian loss
+            hamming_distance (bool): If True the masking loss is computed as hamming distance
+                and the loss_mask is binarized.
         """
         super().__init__()
 
@@ -301,9 +305,15 @@ class BICYCLE(pl.LightningModule):
         self.train_only_latents = train_only_latents
         self.mask_genes = mask_genes
         self.bayes_prior = bayes_prior
+        if self.mask:
+            self.bayes_prior = bayes_prior[mask].flatten()
         self.nll_mask = torch.ones(self.n_genes,
                                    device=gt_interv.device,
                                    dtype=torch.bool)
+        self.hamming_distance = hamming_distance
+
+        if self.hamming_distance:
+            loss_mask = (loss_mask>0).to(int)
         if len(self.mask_genes) > 0:
             for g in self.mask_genes:
                 self.nll_mask[g] = False
@@ -992,7 +1002,11 @@ class BICYCLE(pl.LightningModule):
                     torch.abs(self.gene2factor).mean() + torch.abs(self.factor2gene).mean()
                     )
             if self.training and self.scale_mask>0:
-                loss_mask = torch.linalg.matrix_norm(torch.sub(self.beta, self.bayes_prior, ),ord = "fro", dim = (-1,-2)).mean()
+                if self.hamming_distance:
+                    hamming = HammingDistance(task="binary")
+                    loss_mask = hamming(self.beta,self.bayes_prior.repeat(self.beta.shape[0], 1,1))
+                else:
+                    loss_mask = torch.linalg.matrix_norm(torch.sub(self.beta, self.bayes_prior, ),ord = "fro", dim = (-1,-2)).mean()
 
         else:
             if self.n_factors == 0:
@@ -1002,7 +1016,11 @@ class BICYCLE(pl.LightningModule):
                     "Combination of factorization and masking not implemented yet."
                     )
             if self.training and self.scale_mask>0:
-                loss_mask = torch.linalg.matrix_norm(torch.sub(self.beta_val, self.bayes_prior, ), p=2).mean()
+                if self.hamming_distance:
+                    hamming = HammingDistance(task="binary")
+                    loss_mask = hamming(self.beta_val,self.bayes_prior.repeat(self.beta_val.shape[0], 1,1))
+                else:
+                    loss_mask = torch.linalg.matrix_norm(torch.sub(self.beta_val, self.bayes_prior, ), p=2).mean()
 
         # In case we face valid or test data,
         # we have to detach some parameters that must not get an update

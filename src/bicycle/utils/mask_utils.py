@@ -11,7 +11,7 @@ from torch.utils.data import TensorDataset, DataLoader
 def above_threshold(matrix:np.array, percentile : int = 50, threshold : int = None):
     if threshold is None:
         threshold = np.percentile(matrix, percentile)
-    return (matrix >= np.full(shape=matrix.shape,fill_value=threshold)).astype(int)
+    return (matrix > threshold).astype(int)
 
 def normalize_matrix(df: np.array):
     if type(df) == np.ndarray:
