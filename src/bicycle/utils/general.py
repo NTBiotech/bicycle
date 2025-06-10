@@ -38,7 +38,7 @@ def get_id(dir_path: Path, id_length: int = 5, prefix: str = ""):
     existing_ids = [d.name for d in dir_path.iterdir() if d.is_dir()]
     n = 0
     while id == None:
-        id = prefix + f"0"*(5-len(str(n)))+ str(n)
+        id = prefix + f"0"*(id_length-len(str(n)))+ str(n)
         if id in existing_ids:
             id  = None
             n+=1

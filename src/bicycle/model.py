@@ -308,7 +308,7 @@ class BICYCLE(pl.LightningModule):
                                    device=gt_interv.device,
                                    dtype=torch.bool)
         self.bayes_prior = bayes_prior
-        if self.mask:
+        if (not self.mask is None) and (not bayes_prior is None):
             self.bayes_prior = bayes_prior[mask].flatten()
         self.hamming_distance = hamming_distance
         if self.hamming_distance:
@@ -1017,7 +1017,7 @@ class BICYCLE(pl.LightningModule):
                     )
             if self.training and self.scale_mask>0:
                 if self.hamming_distance:
-                    loss_mask = self.hamming(self.beta_val,self.bayes_prior.repeat(self.beta_val.shape[0], 1,1))
+                    loss_mask = self.hamming(self.beta_val,self.bayes_prior)
                 else:
                     loss_mask = torch.linalg.matrix_norm(torch.sub(self.beta_val, self.bayes_prior, ), p=2).mean()
 
