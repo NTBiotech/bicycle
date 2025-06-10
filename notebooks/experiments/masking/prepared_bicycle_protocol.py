@@ -106,7 +106,7 @@ for directory in [MODELS_PATH, PLOTS_PATH]:
         directory.mkdir(parents=True, exist_ok=True)
 
 # assign id to run
-run_id = get_id(MODELS_PATH, prefix="run_", id_length=3)
+run_id = str(Path(__file__).name)
 
 for directory in [MODELS_PATH, PLOTS_PATH]:
     if not directory.joinpath(run_id).exists():

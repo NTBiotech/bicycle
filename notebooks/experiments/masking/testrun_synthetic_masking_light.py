@@ -58,7 +58,6 @@ argparser.add_argument("--scale_mask", type=float, help="Scaling factor masking 
 
 
 
-
 args = argparser.parse_args()
 print("Passed arguments: ",args)
 
@@ -535,7 +534,7 @@ if CHECKPOINTING:
             monitor="valid_loss",
             mode="min",
             save_weights_only=True,
-            start_after=0,
+            start_after=100,
             save_on_train_epoch_end=False,
             every_n_epochs=1,
         )
@@ -584,6 +583,7 @@ if model.use_latents and n_epochs_pretrain_latents > 0:
         deterministic=False,  # "warn",
         profiler=profiler if profile else None,
         precision=trainer_precision,
+        default_root_dir = MODELS_PATH
     )
     print("PRETRAINING LATENTS!")
     start_time = time.time()
