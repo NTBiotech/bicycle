@@ -106,7 +106,7 @@ for directory in [MODELS_PATH, PLOTS_PATH]:
         directory.mkdir(parents=True, exist_ok=True)
 
 # assign id to run
-run_id = str(Path(__file__).name)
+run_id = str(Path(__file__).parent.name)
 
 for directory in [MODELS_PATH, PLOTS_PATH]:
     if not directory.joinpath(run_id).exists():
@@ -115,9 +115,6 @@ for directory in [MODELS_PATH, PLOTS_PATH]:
 MODELS_PATH = OUT_PATH.joinpath("models", run_id)
 PLOTS_PATH = OUT_PATH.joinpath("plots", run_id)
 print(f"Output paths are: {str(MODELS_PATH)} and {str(PLOTS_PATH)}!")
-
-# add a copy of the protocoll to the dest path
-shutil.copy(__file__, MODELS_PATH)
 
 if not trad_loading:
     validation_size=0
