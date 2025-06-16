@@ -29,6 +29,7 @@ from bicycle.callbacks import (
     GenerateCallback,
     MyLoggerCallback,
 )
+from bicycle.dictlogger import DictLogger
 
 # arguments: 
 SEED = 1
@@ -43,7 +44,7 @@ compiler_kwargs = {}
 compiler_fullgraph = False
 compiler_dynamic = False
 compiler_mode = None
-loader_workers=1
+loader_workers=0
 trainer_precision=32
 matmul_precision="high"
 
@@ -136,7 +137,7 @@ gt_dyn, intervened_variables, samples, gt_interv, sim_regime, beta = create_data
 )
 # initialize data loaders
 print("Initializing Dataloaders...")
-validation_size = 0.2
+validation_size = 0
 batch_size = 1000
 
 train_loader, validation_loader, test_loader = create_loaders(samples=samples,
@@ -258,6 +259,7 @@ log_every_n_steps = 1
 # pretraining
 n_epochs_pretrain_latents = 100
 
+logger = DictLogger()
 if model.use_latents and n_epochs_pretrain_latents > 0:
     print(f"Pretraining model latents for {n_epochs_pretrain_latents} epochs...")
     
@@ -276,6 +278,7 @@ if model.use_latents and n_epochs_pretrain_latents > 0:
         gradient_clip_algorithm="value",
         deterministic=False,  # "warn",
         precision=trainer_precision,
+        logger=logger,
     )
     print("PRETRAINING LATENTS!")
     start_time = time.time()
@@ -303,6 +306,7 @@ trainer = pl.Trainer(
     gradient_clip_algorithm="value",
     deterministic=False,  # "warn",
     precision=trainer_precision,
+    logger=logger,
 )
 
 print("TRAINING THE MODEL!")
