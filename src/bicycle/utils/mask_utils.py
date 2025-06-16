@@ -126,6 +126,38 @@ def get_mask(atac,
     if threshold:
         mask = above_threshold(mask, **threshold_kwargs)
     return mask
+
+def get_mask2(atac,
+             region_to_gene,
+             region_to_tf,
+             threshold = False,
+             percentile : int = 50,
+             correlation = False,
+             corr_normalize = False,
+             corr_threshold = False,
+             corr_threshold_percentile: int = 50,
+             pseudocounts = False,
+             ):
+    """
+    Args:
+    atac (np.array): regions x samples
+    params (dict): function parameters
+    """
+    if pseudocounts:
+        atac += np.min(atac)*0.0001
+    if correlation:
+        corr_atac = np.abs(np.corrcoef(atac))
+        if corr_normalize:
+            corr_atac = normalize_matrix(corr_atac)
+        if corr_threshold:
+            corr_atac = above_threshold(corr_atac, corr_threshold_percentile)
+    else:
+        corr_atac = atac @ atac.T
+    mask = region_to_gene.T @ corr_atac @ region_to_tf
+    if threshold:
+        mask = above_threshold(mask, percentile)
+    return mask
+
 def get_mask_no_data(region_to_gene, region_to_tf, threshold = False, threshold_kwargs = {}, correlation = False, correlation_kwargs = {}, pseudocounts = False, comment=None):
     
     mask = region_to_gene.T @ region_to_tf
@@ -189,10 +221,10 @@ def format_data(
     target_to_gtinterv_col = {contexts[n]:n for n in range(len(contexts))}
 
     # convert contexts to list objects
-    contexts = [string_to_list(x, to_type=str) for x in contexts]
+    #contexts = [string_to_list(x, to_type=str) for x in contexts]
     # number contexts (0:len(contexts)] and create gt_interv with genes x context
     genes = rna.var_names.to_numpy()
-    gt_interv = torch.Tensor(np.array([[g in c for g in genes] for c in contexts]).T)
+    gt_interv = torch.Tensor(np.array([[str(g) == c for g in genes] for c in contexts]).T)
     # data for dataloaders
     sim_regime = torch.Tensor([target_to_gtinterv_col[target] for target in rna.obs.target_genes]).long()
     samples = torch.Tensor(np.array(rna.X),)

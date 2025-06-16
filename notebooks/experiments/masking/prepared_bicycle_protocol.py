@@ -37,7 +37,7 @@ import shutil
 DATA_PATH = Path("/data/toulouse/bicycle/notebooks/experiments/masking/data")
 
 SEED = 1
-GPU_DEVICES = [0]
+GPU_DEVICES = [1]
 monitor_stats = False
 profile = False
 CHECKPOINTING = True
@@ -55,22 +55,22 @@ matmul_precision="high"
 trad_loading=True
 
 # masking
-masking_mode = "loss"
+masking_mode = None
 bin_prior = False
 scale_mask = 1
 parameter_set = "params5"
 grn_noise_factor= 2
 normalize_mask = False
 # data
-create_new_data = False
-scale_factor = 1
+create_new_data = True
+
 #scMultiSim
-data_id = "data_run003"
+data_id = "old_data/run_04"
 
 # training
 validation_size = 0.2
 
-batch_size = 5000
+batch_size = 10000
 n_epochs = 10000
 n_epochs_pretrain_latents = 1000
 
@@ -125,8 +125,8 @@ if create_new_data:
     ## parameters for data creation with prefix data
     print("Setting data creation parameters...")
     data_n_genes = 110 # needs to be a round number
-    data_n_samples_control = 5000
-    data_n_samples_per_perturbation = 10
+    data_n_samples_control = 8000
+    data_n_samples_per_perturbation = 50
     data_make_counts=True
     data_train_gene_ko=list(np.arange(0, data_n_genes, 1).astype(str))
     data_test_gene_ko = []
@@ -198,6 +198,17 @@ if create_new_data:
     model_train_gene_ko = data_train_gene_ko
     model_test_gene_ko = data_test_gene_ko
     model_init_tensors = {}
+    if masking_loss:
+        values = gt_dyn.to_numpy()[gt_dyn>0]
+        grn_noise_var = np.std(values)
+        grn_noise_mean = np.mean(values)
+        grn_noise_p = get_sparsity(gt_dyn)*grn_noise_factor
+        salt = np.random.rand(*gt_dyn.shape) < grn_noise_p
+        bayes_prior = gt_dyn.copy()
+        bayes_prior[salt] = np.random.normal(loc=grn_noise_mean, scale=grn_noise_var, size=np.sum(salt))
+        if normalize_mask:
+            bayes_prior = bayes_prior/np.max(bayes_prior)
+        bayes_prior = torch.Tensor(bayes_prior)
 
 else:
     # get data from data_path
@@ -235,8 +246,9 @@ else:
         hard_mask*=np.diag(np.zeros(hard_mask.shape[0]))
 
     if masking_loss:
-        grn_noise_var = np.std(beta)
-        grn_noise_mean = np.mean(beta)
+        values = grn.to_numpy()[grn>0]
+        grn_noise_var = np.std(values)
+        grn_noise_mean = np.mean(values)
         grn_noise_p = get_sparsity(beta)*grn_noise_factor
         salt = np.random.rand(*beta.shape) < grn_noise_p
         bayes_prior = beta.copy()

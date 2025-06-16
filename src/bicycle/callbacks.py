@@ -63,7 +63,7 @@ class CustomModelCheckpoint(ModelCheckpoint):
         if (
             not self._should_skip_saving_checkpoint(trainer)
             and not self._should_save_on_train_epoch_end(trainer)
-            and (self.start_after >= trainer.current_epoch)
+            and (self.start_after <= trainer.current_epoch)
         ):
             monitor_candidates = self._monitor_candidates(trainer)
             if self._every_n_epochs >= 1 and (trainer.current_epoch + 1) % self._every_n_epochs == 0:
