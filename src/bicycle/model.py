@@ -43,9 +43,11 @@ from torch import optim
 from torch import Tensor, nn
 from torch.distributions.kl import kl_divergence
 from torch.utils.data import DataLoader, TensorDataset
-from torchmetrics import HammingDistance
+from torchmetrics import HammingDistance, F1Score, AveragePrecision, AUROC
+from torch.special import expit
 
 from bicycle.utils.training import EarlyStopperTorch, lyapunov_direct
+from bicycle.utils.mask_utils import get_sparsity
 
 def init_weights(m):
     """
@@ -1369,7 +1371,7 @@ class BICYCLE(pl.LightningModule):
             enable_progress_bar=False,
             enable_checkpointing=False,
             enable_model_summary=False,
-            log_every_n_steps=100
+            log_every_n_steps=100000
         )
 
         start_time = time.time()
@@ -1391,13 +1393,98 @@ class BICYCLE(pl.LightningModule):
             samples:torch.Tensor,
     ):
         with torch.no_grad():
-            P = torch.distributions.Normal(loc=z_bar.detach(), scale=omega.detach())
+            scale = torch.diag(omega.detach())
+            P = torch.distributions.Normal(loc=z_bar.detach(), scale=scale)
             logs = P.log_prob(samples)
             print(logs.shape)
             nll =  -1 * torch.sum(logs)
             # divide by number of samples for mean nll per sample
             nll /= samples.shape[0]
             return nll
+    
+    def evaluate(
+            self,
+            test_data:TensorDataset,
+            compare_latents = True,
+            compute_nll = True,
+            compute_class_metrics = True,
+            **kwargs
+            ):
+
+        metrics = {}
+        if compute_nll:
+            # compute the nll for unseen perturbations
+            test_samples, test_sim_regime, test_z_idxs, cat = test_data.tensors
+            if compare_latents:
+                test_samples = self.z_loc.detach()[test_z_idxs]
+            if not (cat==2).all():
+                raise TypeError("Data contains non test_data!")
+
+            gene_idxs = np.arange(test_samples.shape[1])
+            target_mu = np.median(self.alpha_p.detach().numpy())
+            target_std = np.median(self.sigma_p.detach().numpy())
+
+            nlls = []
+            contexts = set(test_sim_regime)
+            for context in contexts:
+                mask = test_sim_regime == context
+                samples = test_samples[mask]
+                target_idxs = gene_idxs[self.gt_interv[:,context].T.to(bool)]
+
+                z_bar, omega = self.predict_perturbation(
+                    target_idx = target_idxs, # target index in genes
+                    target_mu=target_mu,
+                    target_std=target_std,
+                    **kwargs,
+                )
+
+                nll = self.test_nll(
+                    z_bar=z_bar,
+                    omega=omega,
+                    samples=samples
+                )
+
+                nlls.append(nll)
+            nll_mean = torch.mean(nlls)
+            nll_std = torch.std(nlls)        
+            nll = (nll_mean, nll_std)
+        # compute classification metrics
+        if compute_class_metrics:
+            max_f1 = False
+            beta = self.beta.detach()
+            if beta.device != "cpu":
+                beta = beta.cpu()
+            grn = self.gt_beta
+            grn = grn.flatten()
+            beta = beta.flatten()
+            # normalize to [0, 1]
+            grn = (grn > 0)
+            # center and scale beta
+            beta = beta-torch.mean(beta)
+            beta = beta/torch.std(beta)
+            beta = expit(beta)
+
+            average_precision_score = AveragePrecision(task="binary")
+            f1_score = F1Score(task="binary")
+            auroc = AUROC(task="binary")
+
+
+            max_f1 = f1_score(beta, grn)
+
+            average_precision = average_precision_score(beta, grn)
+
+            auroc = auroc(beta, grn)
+            
+            if self.bayes_prior != None:
+                prior = self.bayes_prior
+                prior = prior.flatten()
+                prior[prior < 0] = 0
+                prior = expit(prior)
+                prior_average_precision = average_precision_score(prior, grn)
+                
+                return nll, max_f1, average_precision, auroc, prior_average_precision
+            
+        return nll, max_f1, average_precision, auroc
 
     def forward(self, *args, **kwargs):
         raise NotImplementedError()
