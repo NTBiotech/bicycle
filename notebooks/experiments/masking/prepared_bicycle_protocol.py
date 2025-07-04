@@ -49,20 +49,20 @@ compiler_kwargs = {}
 compiler_fullgraph = False
 compiler_dynamic = False
 compiler_mode = None
-loader_workers=5
+loader_workers=1
 trainer_precision=32
 matmul_precision="high"
 trad_loading=True
 
 # masking
-masking_mode = "loss"
+masking_mode = None
 bin_prior = False
-scale_mask = 10
+scale_mask = 1
 parameter_set = "params5"
-grn_noise_factor = 1
+grn_noise_factor = 0.5
 normalize_mask = False
 # data
-data_source = "create_data_from_grn"
+data_source = "create_data"
 
 #scMultiSim
 data_id = "data_run000"
@@ -74,6 +74,8 @@ batch_size = 10000
 n_epochs = 10000
 n_epochs_pretrain_latents = 1000
 
+# testing
+evaluate = True
 
 if masking_mode != "loss" and bin_prior:
     raise NotImplementedError("masking mode must be loss for bin_prior")
@@ -121,9 +123,9 @@ if data_source == "create_data":
     # create synthetic data
     ## parameters for data creation with prefix data
     print("Setting data creation parameters...")
-    data_n_genes = 110 # needs to be a round number
-    data_n_samples_control = 8000
-    data_n_samples_per_perturbation = 50
+    data_n_genes = 10 # needs to be a round number
+    data_n_samples_control = 500
+    data_n_samples_per_perturbation = 250
     data_make_counts=True
     data_train_gene_ko=list(np.arange(0, data_n_genes, 1).astype(str))
     data_test_gene_ko = []
@@ -134,7 +136,7 @@ if data_source == "create_data":
 
     data_graph_type="erdos-renyi"
     data_edge_assignment="random-uniform"
-    data_sem="linear-ou"
+    data_sem="linear"
     data_make_contractive=True
     data_verbose=True
     data_intervention_type="Cas9"
@@ -203,12 +205,14 @@ if data_source == "create_data":
         grn_noise_p = get_sparsity(gt_dyn)*grn_noise_factor
         salt = np.random.rand(*gt_dyn.shape) < grn_noise_p
         bayes_prior = gt_dyn.copy()
-        bayes_prior[salt] = np.random.normal(loc=grn_noise_mean, scale=grn_noise_var, size=np.sum(salt))
+        bayes_prior[salt] = np.abs(np.random.normal(loc=grn_noise_mean, scale=grn_noise_var, size=np.sum(salt)))
         if normalize_mask:
             bayes_prior = bayes_prior/np.max(bayes_prior)
-        bayes_prior = torch.Tensor(bayes_prior)
+        bayes_prior = torch.tensor(bayes_prior)
 
 elif data_source == "scMultiSim":
+    if evaluate:
+        raise NotImplementedError("Testing on scMultiSim data not implemented!")
     # get data from data_path
     # to define: samples (samples x genes), gt_interv (genes x contexts), sim_regime (intervened_variables = gt_interv[:, sim_regime].transpose(0, 1)), beta (n_genes x n_genes)
     
@@ -282,10 +286,10 @@ elif data_source == "scMultiSim":
         grn_noise_p = get_sparsity(beta)*grn_noise_factor
         salt = np.random.rand(*beta.shape) < grn_noise_p
         bayes_prior = beta.copy()
-        bayes_prior[salt] = np.random.normal(loc=grn_noise_mean, scale=grn_noise_var, size=np.sum(salt))
+        bayes_prior[salt] = np.abs(np.random.normal(loc=grn_noise_mean, scale=grn_noise_var, size=np.sum(salt)))
         if normalize_mask:
             bayes_prior = bayes_prior/np.max(bayes_prior)
-        bayes_prior = torch.Tensor(bayes_prior)
+        bayes_prior = torch.tensor(bayes_prior)
 
 elif data_source == "create_data_from_grn":
     # create synthetic data
@@ -298,8 +302,8 @@ elif data_source == "create_data_from_grn":
             grn_path /= p.name
     beta = pd.read_csv(grn_path, index_col=0).to_numpy()
     data_n_genes=beta.shape[0]
-    data_n_samples_control = 8000
-    data_n_samples_per_perturbation = 400
+    data_n_samples_control = 500
+    data_n_samples_per_perturbation = 250
     data_train_gene_ko=list(np.arange(0, data_n_genes, 1).astype(str))
     data_test_gene_ko = []
     while len(data_test_gene_ko)<= data_n_genes*2:
@@ -374,10 +378,10 @@ elif data_source == "create_data_from_grn":
         grn_noise_p = get_sparsity(gt_dyn)*grn_noise_factor
         salt = np.random.rand(*gt_dyn.shape) < grn_noise_p
         bayes_prior = gt_dyn.copy()
-        bayes_prior[salt] = np.random.normal(loc=grn_noise_mean, scale=grn_noise_var, size=np.sum(salt))
+        bayes_prior[salt] = np.abs(np.random.normal(loc=grn_noise_mean, scale=grn_noise_var, size=np.sum(salt)))
         if normalize_mask:
             bayes_prior = bayes_prior/np.max(bayes_prior)
-        bayes_prior = torch.Tensor(bayes_prior)
+        bayes_prior = torch.tensor(bayes_prior)
 
 else:
     raise ValueError(f"Invalid data_source: {data_source}. Choose one of ['create_data','create_data_from_grn','scMultiSim']!")
@@ -422,9 +426,6 @@ model_learn_T = False
 model_train_only_likelihood = False
 model_train_only_latents = False
 model_mask_genes = []
-
-# create mask from atac data
-
 
 print("Initializing BICYCLE model...")
 if trad_loading:
@@ -483,7 +484,7 @@ else:
         optimizer = model_optimizer,
         optimizer_kwargs = model_optimizer_kwargs,
         device = model_device,
-        loss_scale = torch.Tensor([model_scale_l1, model_scale_spectral, model_scale_lyapunov, model_scale_kl]),
+        loss_scale = torch.tensor([model_scale_l1, model_scale_spectral, model_scale_lyapunov, model_scale_kl]),
         early_stopping = model_early_stopping,
         early_stopping_min_delta = model_early_stopping_min_delta,
         early_stopping_patience = model_early_stopping_patience,
@@ -658,6 +659,37 @@ end_time = time.time()
 training_time = float(end_time - start_time)
 print(f"Training took {training_time} seconds.")
 
+# compute nll on unseen perturbations
+
+# compute the nll loss for P(\theta|z) from N(z_bar|omega)
+test_samples, test_sim_regime, test_z_idxs = test_loader.dataset[:]
+contexts = gt_interv[:,sim_regime]
+gene_idxs = np.arange(samples.shape[1])
+target_genes = [gene_idxs[c] for c in contexts]
+
+target_mu = np.median(model.alpha_p.detach().numpy())
+target_std = np.median(model.sigma_p.detach().numpy())
+for context in target_genes:
+# fit omega to perturbation
+    model.predict_perturbation(
+        target_idx = context, # target index in genes
+        target_mu=target_mu,
+        target_std=target_std,
+        max_epochs=1000,
+        perturbation_type=[],
+        perturbation_like=[],
+    )
+    model.test_nll()
+
+pd.DataFrame(globals().items()).to_csv(PLOTS_PATH/"globals.csv")
+
+if evaluate:
+    model.to(data_device)
+    if masking_loss:
+        nll, max_f1, average_precision, auroc, prior_average_precision =  model.evaluate(test_loader.dataset)
+    else:
+        nll, max_f1, average_precision, auroc =  model.evaluate(test_loader.dataset)
+
 
 # log the environment
-pd.DataFrame(globals().items()).to_csv(os.path.join(PLOTS_PATH, "globals.csv"))
+pd.DataFrame(globals().items()).to_csv(PLOTS_PATH/"globals.csv")
