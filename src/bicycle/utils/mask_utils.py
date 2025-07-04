@@ -35,7 +35,7 @@ def add_saltpepper(mtx:np.ndarray, p, min=None, max=None):
         max = np.max(mtx)    
     if min is None:
         min = np.min(mtx)
-    indexes = np.random.rand(*mtx.shape)<p
+    indexes = np.random.rand(*mtx.shape)<=p
     mtx[indexes] = np.random.choice([min, max], p=[0.8, 0.2], size=np.sum(indexes))
     return mtx
 

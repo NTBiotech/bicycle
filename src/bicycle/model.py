@@ -190,6 +190,9 @@ class OmegaIterative(pl.LightningModule):
         """Computes the right-hand side of the LE: $$\sigma @ \sigma.T$$."""
         return self.sigma.detach() @ self.sigma.detach().transpose(0, 1)
 
+    def optimizer_step(self, epoch, batch_idx, optimizer, optimizer_closure = None):
+        super().optimizer_step(epoch, batch_idx, optimizer, optimizer_closure)
+        self.omega.data = self.omega.data.clamp(min=0.0001)
 
 class BICYCLE(pl.LightningModule):
     def __init__(
@@ -239,7 +242,7 @@ class BICYCLE(pl.LightningModule):
 
         Args:
             lr (float): Learning rate.
-            gt_interv (torch.Tensor): Ground truth intervention matrix.
+            gt_interv (torch.Tensor): Ground truth intervention matrix. (genes x intervention contexts)
             n_genes (int): Number of genes.
             n_samples (int): Number of cells/samples.
             lyapunov_penalty (bool): Whether to use the Lyapunov function in the loss calculation.
@@ -1295,9 +1298,8 @@ class BICYCLE(pl.LightningModule):
         # c.f. stationary distribution of univariate Ornstein-Uhlenbeck process,
         # e.g., here: https://en.wikipedia.org/wiki/Ornstein%E2%80%93Uhlenbeck_process
         sigma_p = math.sqrt(2.0) * torch.Tensor(
-            np.asarray(target_std), device=self.device, dtype=self.sigma.dtype
-        )
-        alpha_p = torch.Tensor(np.asarray(target_mu), device=self.device, dtype=self.alpha.dtype)
+            np.asarray(target_std), device=self.device).to(dtype=self.sigma.dtype)
+        alpha_p = torch.Tensor(np.asarray(target_mu), device=self.device).to(dtype=self.alpha.dtype)
 
         gt_interv_orig = self.gt_interv
 
@@ -1314,9 +1316,10 @@ class BICYCLE(pl.LightningModule):
 
         # In case use explicitly specified expected means and standard deviations
         # for LATENT expression, use these
-        if len(target_mu) == len(target_idx) and len(target_std) == len(target_idx):
-            alpha[target_idx] = alpha_p
-            sigma[target_idx] = sigma_p
+        if target_mu != []:
+            if len(target_mu) == len(target_idx) and len(target_std) == len(target_idx):
+                alpha[target_idx] = alpha_p
+                sigma[target_idx] = sigma_p
 
         # Use specified perturbed training genes, which they assume to show target-gene perturbation effects
         # similar to those expected for the predicted interventions
@@ -1363,12 +1366,38 @@ class BICYCLE(pl.LightningModule):
             accelerator="cpu",  # if str(device).startswith("cuda") else "cpu",
             # devices=[GPU_DEVICE],  # if str(device).startswith("cuda") else 1,
             num_sanity_val_steps=0,
+            enable_progress_bar=False,
+            enable_checkpointing=False,
+            enable_model_summary=False,
+            log_every_n_steps=100
         )
 
         start_time = time.time()
         trainer.fit(omega_model, dataloader)
         end_time = time.time()
         print(f"Training took {end_time - start_time:.2f} seconds")
+
+        omega = omega_model.omega.detach()
+        B = omega_model.B
+        # get z_bar
+        z_bar = torch.linalg.solve(B, alpha)
+
+        return z_bar, omega
+
+    def test_nll(
+            self,
+            z_bar:torch.Tensor,
+            omega:torch.Tensor,
+            samples:torch.Tensor,
+    ):
+        with torch.no_grad():
+            P = torch.distributions.Normal(loc=z_bar.detach(), scale=omega.detach())
+            logs = P.log_prob(samples)
+            print(logs.shape)
+            nll =  -1 * torch.sum(logs)
+            # divide by number of samples for mean nll per sample
+            nll /= samples.shape[0]
+            return nll
 
     def forward(self, *args, **kwargs):
         raise NotImplementedError()
