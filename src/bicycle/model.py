@@ -1425,7 +1425,7 @@ class BICYCLE(pl.LightningModule):
             target_std = np.median(self.sigma_p.detach().numpy())
 
             nlls = []
-            contexts = set(test_sim_regime)
+            contexts = test_sim_regime.unique()
             for context in contexts:
                 mask = test_sim_regime == context
                 samples = test_samples[mask]
@@ -1445,12 +1445,11 @@ class BICYCLE(pl.LightningModule):
                 )
 
                 nlls.append(nll)
-            nll_mean = torch.mean(nlls)
-            nll_std = torch.std(nlls)        
+            nll_mean = np.mean(nlls)
+            nll_std = np.std(nlls)        
             nll = (nll_mean, nll_std)
         # compute classification metrics
         if compute_class_metrics:
-            max_f1 = False
             beta = self.beta.detach()
             if beta.device != "cpu":
                 beta = beta.cpu()
@@ -1466,23 +1465,25 @@ class BICYCLE(pl.LightningModule):
 
             average_precision_score = AveragePrecision(task="binary")
             f1_score = F1Score(task="binary")
-            auroc = AUROC(task="binary")
+            auroc_score = AUROC(task="binary")
 
 
             max_f1 = f1_score(beta, grn)
 
             average_precision = average_precision_score(beta, grn)
 
-            auroc = auroc(beta, grn)
+            auroc = auroc_score(beta, grn)
             
             if self.bayes_prior != None:
-                prior = self.bayes_prior
+                prior = self.bayes_prior.cpu()
                 prior = prior.flatten()
                 prior[prior < 0] = 0
                 prior = expit(prior)
                 prior_average_precision = average_precision_score(prior, grn)
+                prior_auroc = auroc_score(prior, grn)
+
                 
-                return nll, max_f1, average_precision, auroc, prior_average_precision
+                return nll, max_f1, average_precision, auroc, prior_average_precision, prior_auroc
             
         return nll, max_f1, average_precision, auroc
 

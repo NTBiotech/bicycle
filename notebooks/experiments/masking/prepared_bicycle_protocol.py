@@ -15,22 +15,17 @@ import pytorch_lightning as pl
 from pytorch_lightning.callbacks import StochasticWeightAveraging, DeviceStatsMonitor
 from pytorch_lightning.callbacks.early_stopping import EarlyStopping
 from pytorch_lightning.profilers import AdvancedProfiler
-from pytorch_lightning.loggers import Logger, CSVLogger
 import scanpy as sc
 
 
 from bicycle.utils.data import create_data, create_loaders, get_diagonal_mask, create_data_from_grn
-from bicycle.utils.general import get_id
-from bicycle.utils.plotting import plot_training_results
 from bicycle.callbacks import (
     CustomModelCheckpoint,
-    GenerateCallback,
     MyLoggerCallback,
 )
 from bicycle.utils.mask_utils import format_data, get_sparsity
 from bicycle.dictlogger import DictLogger
 import pickle
-import shutil
 
 
 
@@ -55,7 +50,7 @@ matmul_precision="high"
 trad_loading=True
 
 # masking
-masking_mode = None
+masking_mode = "loss"
 bin_prior = False
 scale_mask = 1
 parameter_set = "params5"
@@ -66,6 +61,8 @@ data_source = "create_data"
 
 #scMultiSim
 data_id = "data_run000"
+# erdos renyi
+data_sem="linear-ou"
 
 # training
 validation_size = 0.2
@@ -136,7 +133,6 @@ if data_source == "create_data":
 
     data_graph_type="erdos-renyi"
     data_edge_assignment="random-uniform"
-    data_sem="linear"
     data_make_contractive=True
     data_verbose=True
     data_intervention_type="Cas9"
@@ -199,12 +195,12 @@ if data_source == "create_data":
     model_test_gene_ko = data_test_gene_ko
     model_init_tensors = {}
     if masking_loss:
-        values = gt_dyn.to_numpy()[gt_dyn>0]
+        values = beta.numpy()[beta>0]
         grn_noise_var = np.std(values)
         grn_noise_mean = np.mean(values)
-        grn_noise_p = get_sparsity(gt_dyn)*grn_noise_factor
-        salt = np.random.rand(*gt_dyn.shape) < grn_noise_p
-        bayes_prior = gt_dyn.copy()
+        grn_noise_p = get_sparsity(beta)*grn_noise_factor
+        salt = np.random.rand(*beta.shape) < grn_noise_p
+        bayes_prior = beta.clone().numpy()
         bayes_prior[salt] = np.abs(np.random.normal(loc=grn_noise_mean, scale=grn_noise_var, size=np.sum(salt)))
         if normalize_mask:
             bayes_prior = bayes_prior/np.max(bayes_prior)
@@ -311,7 +307,6 @@ elif data_source == "create_data_from_grn":
         data_test_gene_ko=list(set(data_test_gene_ko))
     data_test_gene_ko = [f"{x[0]},{x[1]}" for x in data_test_gene_ko]
     data_make_counts=True
-    data_sem="linear"
     data_verbose=True
     data_intervention_type="Cas9"
     data_T=1.0
@@ -372,12 +367,12 @@ elif data_source == "create_data_from_grn":
     model_test_gene_ko = data_test_gene_ko
     model_init_tensors = {}
     if masking_loss:
-        values = gt_dyn[gt_dyn>0]
+        values = beta.numpy()[beta>0]
         grn_noise_var = np.std(values)
         grn_noise_mean = np.mean(values)
-        grn_noise_p = get_sparsity(gt_dyn)*grn_noise_factor
-        salt = np.random.rand(*gt_dyn.shape) < grn_noise_p
-        bayes_prior = gt_dyn.copy()
+        grn_noise_p = get_sparsity(beta)*grn_noise_factor
+        salt = np.random.rand(*beta.shape) < grn_noise_p
+        bayes_prior = beta.clone()
         bayes_prior[salt] = np.abs(np.random.normal(loc=grn_noise_mean, scale=grn_noise_var, size=np.sum(salt)))
         if normalize_mask:
             bayes_prior = bayes_prior/np.max(bayes_prior)
@@ -659,36 +654,16 @@ end_time = time.time()
 training_time = float(end_time - start_time)
 print(f"Training took {training_time} seconds.")
 
-# compute nll on unseen perturbations
-
-# compute the nll loss for P(\theta|z) from N(z_bar|omega)
-test_samples, test_sim_regime, test_z_idxs = test_loader.dataset[:]
-contexts = gt_interv[:,sim_regime]
-gene_idxs = np.arange(samples.shape[1])
-target_genes = [gene_idxs[c] for c in contexts]
-
-target_mu = np.median(model.alpha_p.detach().numpy())
-target_std = np.median(model.sigma_p.detach().numpy())
-for context in target_genes:
-# fit omega to perturbation
-    model.predict_perturbation(
-        target_idx = context, # target index in genes
-        target_mu=target_mu,
-        target_std=target_std,
-        max_epochs=1000,
-        perturbation_type=[],
-        perturbation_like=[],
-    )
-    model.test_nll()
-
 pd.DataFrame(globals().items()).to_csv(PLOTS_PATH/"globals.csv")
 
 if evaluate:
     model.to(data_device)
     if masking_loss:
         nll, max_f1, average_precision, auroc, prior_average_precision =  model.evaluate(test_loader.dataset)
+        print(f"nll:{nll}, max_f1:{max_f1}, average_precision:{average_precision}, auroc:{auroc}, prior_average_precision:{prior_average_precision}")
     else:
         nll, max_f1, average_precision, auroc =  model.evaluate(test_loader.dataset)
+        print(f"nll: {nll}, max_f1: {max_f1}, average_precision: {average_precision}, auroc: {auroc}")
 
 
 # log the environment
