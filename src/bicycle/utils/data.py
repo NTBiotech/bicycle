@@ -4,9 +4,13 @@ import numpy as np
 import seaborn as sns
 import torch
 from bicycle.utils.training import lyapunov_direct
+from bicycle.utils.plotting import plot_comparison
 from sklearn.model_selection import train_test_split
 from torch.utils.data import DataLoader
 from tqdm.auto import tqdm
+from scipy.stats.distributions import norm
+import json
+from pathlib import Path
 
 
 def create_data(
@@ -1314,3 +1318,178 @@ def create_data_from_grn(
     else:
         raise ValueError(f"SEM {sem} not implemented. Choose one of ['linear', 'linear-ou'].")
 
+def generate_grn(
+        n_genes = 10,
+        grn_shape = (0,0),
+        grn_params = {},
+        fit_to_standard = False,
+        standard_grn_path = None,
+        distribute_TFs = True,
+        out_path = Path("../"),
+        verbose = False,
+        eigenvalues = True,
+        clip_standard = None,
+        sample_connections =False
+        ):
+    """
+    Function to sample a grn from a bimodal normal distribution.
+
+    Args.:
+        n_genes
+        grn_params (dict): dict with loc1, std1, loc2, std2, sparsity.
+        fit_to_standard (bool): Wether to simulate based on a prior grn.
+            In this case, the other parameters are derived from the standard grn.
+        standard_grn_path (str or Path): Path to a csv containing the standard grn.
+        distribute_TFs (bool): Determines if TFs will be the first n_TFs genes
+            or distributed randomly.
+        verbose (bool)
+        eigenvalues (bool): If True the eigenvalues of the grn will be positive.
+        clip_standard (int): If not None, the last clip_standard genes
+            of the standard will be clipped before processing.
+        sample_connections (bool): Wether to sample from connectivity_distribution.
+    Returns:
+        new_grn (np.ndarray)
+        generation_kwargs (dict)
+    """
+    def fit_to_grn(grn:np.ndarray):
+        """Function to fit a bimodal Normal distribution to grn values."""
+        values = grn.flatten()
+        values = np.sort(values[values!=0])
+        values1= values[:len(values)//2]
+        values2= values[len(values)//2:]
+    
+        loc1, std1 = norm.fit(values1)
+        loc2, std2= norm.fit(values2)
+    
+        return loc1, std1, loc2, std2
+
+    if grn_shape == (0,0):
+        grn_shape = (n_genes, n_genes)
+        
+    if verbose:
+        if not out_path.exists():
+            out_path.mkdir(parents=True, exist_ok=True)
+
+
+    TF_names = np.arange(1, grn_shape[1]+1).astype(str)
+    gene_names = np.arange(1, grn_shape[0]+1).astype(str)
+    if distribute_TFs:
+        TF_names = np.random.choice(np.arange(1, grn_shape[0]+1), size=grn_shape[1], replace=False).astype(str)
+        gene_names = np.arange(1, grn_shape[0]+1).astype(str)
+    if verbose:
+        print(f"TFs are {TF_names.tolist()}")
+
+    ## First we create sample a grn form a bimodal normal distribution
+    # To get the parameters we can either use an input or we can model of of the standard_grn
+    if fit_to_standard:
+        standard_grn = np.loadtxt(standard_grn_path, skiprows=1, delimiter=",", usecols=np.arange(1, n_genes+1))
+        if clip_standard!=None:
+            standard_grn=standard_grn[:-clip_standard]
+        print("Using supplied standard grn")
+        loc1, std1, loc2, std2 = fit_to_grn(standard_grn)
+        grn_sparsity = np.sum(standard_grn==0).sum()/np.prod(standard_grn.shape)
+        sparsity = grn_sparsity
+        print(f"Gt sparsity: {grn_sparsity}")
+        
+
+    else:
+        print("Using supplied parameters")
+        loc1 = grn_params.get("loc1", 2)
+        std1 = grn_params.get("std1", 0.4)
+        loc2 = grn_params.get("loc2", 3.8)
+        std2 = grn_params.get("std2", 0.6)
+        sparsity = grn_params.get("sparsity", 0.8)
+        standard_grn = None
+
+    if fit_to_standard and sample_connections:
+            # also fit connectivity distribution (TFs per gene)
+            con = np.sum(standard_grn>0, axis=1)/standard_grn.shape[1]
+            val, counts = np.unique(con, return_counts=True)
+            counts = counts / np.sum(counts)
+    
+    success = False
+    while not success:
+        if fit_to_standard and sample_connections:
+            connectivities = np.random.choice(val, size=grn_shape[0], replace=True, p=counts)
+            connectivities *= grn_shape[1]
+            connectivities = np.round(connectivities).astype(int)
+        
+            form = np.zeros(grn_shape)
+            for n, con in enumerate(connectivities):
+                row = np.append(np.ones(con), np.zeros(grn_shape[1]-con))
+                np.random.shuffle(row)
+                form[n] = row
+
+        else:
+            form = np.random.rand(*grn_shape)>sparsity
+        
+        if grn_shape[0] == grn_shape[1]:
+            form = form *(np.ones(form.shape)-np.identity(n_genes))
+        form = form.astype(bool)
+        # check if all genes are involved
+        for n in range(n_genes):
+            while np.sum(np.append(form[n], form[:,n])) == 0:
+                form[:,n] = np.random.rand(n_genes)>sparsity
+                form[n] = np.random.rand(n_genes)>sparsity
+                form[n,n] = 0
+
+
+        if np.sum(form) % 2 == 0:
+            success = True
+        else:
+            if verbose:
+                print("GRN connectivities not multiple of 2")
+            success=False
+            continue
+        form_sparsity = np.sum(form==0).sum()/np.prod(form.shape)
+        if np.abs(form_sparsity-sparsity) > 0.05:
+            if verbose:
+                print(f"GRN sparsity {form_sparsity} too high, resampling!")
+            success=False
+            continue
+        n = np.sum(form).astype(int)
+        # fill the connections with samples from the bimodal dist.
+        sampled1 = np.random.normal(loc=loc1, scale=std1, size=n//2)
+        sampled2 = np.random.normal(loc=loc2, scale=std2, size=n//2)
+        sampled = np.append(sampled1, sampled2)
+
+        np.random.shuffle(sampled)
+        values = np.zeros(grn_shape)
+        values[form] = np.absolute(sampled)
+        success = True
+        
+        if eigenvalues:
+            #check if the eigenvalues of B are >0
+            B = np.identity(values.shape[0])-values
+            eig_values = np.linalg.eigvals(B)
+            print(f"Eigenvalues of B:\n{eig_values}")
+            if not (eig_values>0).all():
+                if verbose:
+                    print("Eigenvalues not >0. Repeating...")
+                success = False
+
+    
+    new_grn_sparsity = np.sum(values==0).sum()/np.prod(values.shape)
+    print("GRN sparsity: ",new_grn_sparsity)
+
+    if verbose:
+        generation_kwargs = {
+            "loc1":loc1, 
+            "std1":std1, 
+            "loc2":loc2, 
+            "std2":std2,
+            "sparsity": sparsity,
+            "n_genes":n_genes,
+        }
+        fig = plot_comparison(values, standard_grn, dist = generation_kwargs)
+        fig.savefig(out_path/f"{grn_shape[0]}gene{grn_shape[1]}tfGRN.pdf")
+        fig.show()
+
+        np.savetxt(out_path/f"{grn_shape[0]}gene{grn_shape[1]}tfGRN.csv", values, delimiter=",")
+
+        if sample_connections:
+            generation_kwargs["connectivity_dist"]=(val.tolist(), counts.tolist())
+        with open(out_path/"generation_kwargs.json", "w") as wf:
+            json.dump(generation_kwargs, fp=wf)
+
+    return values

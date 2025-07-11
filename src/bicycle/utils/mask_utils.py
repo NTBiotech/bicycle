@@ -8,6 +8,26 @@ import torch
 from sklearn.model_selection import train_test_split
 from torch.utils.data import TensorDataset, DataLoader
 
+def normalize_data(data:np.ndarray, cpm = True, scale = True):
+    """Function for cpm normalization and scaling and centering of genes."""
+    print("Normalizing data")
+    # normalize data
+    convert = False
+    if type(data) == pd.DataFrame:
+        convert = True
+        columns = data.columns
+        index = data.index
+        data = data.to_numpy()
+    if cpm:
+        data = np.log1p((data/ np.sum(data, axis=1, keepdims=True))*1e6)
+    if scale:
+        # scale and center data (per gene)
+        data = (data - np.mean(data, axis=0))/np.std(data, axis=0)
+        data[np.isnan(data)] = 0
+    if convert:
+        data = pd.DataFrame(data, columns=columns, index=index)
+    return data
+
 def above_threshold(matrix:np.array, percentile : int = 50, threshold : int = None):
     if threshold is None:
         threshold = np.percentile(matrix, percentile)
@@ -127,17 +147,18 @@ def get_mask(atac,
         mask = above_threshold(mask, **threshold_kwargs)
     return mask
 
-def get_mask2(atac,
-             region_to_gene,
-             region_to_tf,
-             threshold = False,
-             percentile : int = 50,
-             correlation = False,
-             corr_normalize = False,
-             corr_threshold = False,
-             corr_threshold_percentile: int = 50,
-             pseudocounts = False,
-             ):
+def get_mask2(
+        atac,
+        region_to_gene,
+        region_to_tf,
+        threshold = False,
+        percentile : int = 50,
+        correlation = False,
+        corr_normalize = False,
+        corr_threshold = False,
+        corr_threshold_percentile: int = 50,
+        pseudocounts = False,
+        ):
     """
     Args:
     atac (np.array): regions x samples
