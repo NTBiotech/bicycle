@@ -143,7 +143,10 @@ class OmegaIterative(pl.LightningModule):
                  sigma,
                  lr=1e-2,
                  sigma_min=1e-3,
-                 device="cpu"):
+                 device="cpu",
+                 clamp = True,
+                 transform = None,
+                 ):
 
         super().__init__()
         super().to(device)
@@ -156,7 +159,9 @@ class OmegaIterative(pl.LightningModule):
         self.n_genes = alpha.shape[0]
         self.lr = lr
         self.sigma_min = sigma_min
-
+        self.clamp = clamp
+        self.transform = transform
+        
         self.omega = torch.nn.Parameter(0.1 * torch.randn((self.n_genes, self.n_genes),
                                                           device=device))
 
@@ -185,7 +190,11 @@ class OmegaIterative(pl.LightningModule):
 
     def lyapunov_lhs(self):
         """Computes the left-hand side of the LE: $$B @ \omega + (B @ \omega).T$$."""
-        mat = self.B.detach() @ self.omega
+        if self.transform != None:
+            omega = self.transform(self.omega)
+        else:
+            omega = self.omega
+        mat = self.B.detach() @ omega
         return mat + mat.transpose(0, 1)
 
     def lyapunov_rhs(self):
@@ -194,7 +203,8 @@ class OmegaIterative(pl.LightningModule):
 
     def optimizer_step(self, epoch, batch_idx, optimizer, optimizer_closure = None):
         super().optimizer_step(epoch, batch_idx, optimizer, optimizer_closure)
-        self.omega.data = self.omega.data.clamp(min=0.0001)
+        if self.clamp:
+            self.omega.data = self.omega.data.clamp(min=0.0001)
 
 class BICYCLE(pl.LightningModule):
     def __init__(
@@ -930,10 +940,6 @@ class BICYCLE(pl.LightningModule):
         spectral_loss = torch.clip(real_eigval_max_c, min=-0.01).mean()
         return spectral_loss
 
-    def compute_mask_diff(self):
-        diff = self.beta - self.bayes_prior
-        return torch.linalg.matrix_norm(diff, p=2)
-
     def training_step(self, batch, batch_idx):
         kwargs = {"on_step": False, "on_epoch": True}
         # check for multiple gpu usage
@@ -1290,6 +1296,7 @@ class BICYCLE(pl.LightningModule):
         max_epochs=1000,
         perturbation_type=[],
         perturbation_like=[],
+        **kwargs,
     ):
 
         self.gt_interv.to(self.device)
@@ -1357,7 +1364,7 @@ class BICYCLE(pl.LightningModule):
 
         sigma = torch.diag_embed(sigma)
 
-        omega_model = OmegaIterative(alpha, beta, sigma, device=self.device)
+        omega_model = OmegaIterative(alpha, beta, sigma, device=self.device, **kwargs)
 
         # Empty dataloader, just so PL won't complain
         dataset = TensorDataset(torch.zeros((1, 1)))
@@ -1393,36 +1400,43 @@ class BICYCLE(pl.LightningModule):
             samples:torch.Tensor,
     ):
         with torch.no_grad():
-            scale = torch.diag(omega.detach())
-            P = torch.distributions.Normal(loc=z_bar.detach(), scale=scale)
+            scale = torch.sqrt(torch.diag(omega))
+            P = torch.distributions.Normal(loc=z_bar, scale=scale)
+            #P = torch.distributions.MultivariateNormal(loc=z_bar.detach(), covariance_matrix=omega)
             logs = P.log_prob(samples)
             print(logs.shape)
             nll =  -1 * torch.sum(logs)
-            # divide by number of samples for mean nll per sample
-            nll /= samples.shape[0]
+            if len(samples.shape)>1:
+                nll = nll/samples.shape[0]
+            print(nll.shape)
             return nll
     
     def evaluate(
             self,
             test_data:TensorDataset,
-            compare_latents = True,
+            compare_latents = False,
             compute_nll = True,
             compute_class_metrics = True,
-            **kwargs
+            latents_sampled = True,
+            omega_transform = None,
+            dist = None,
+            use_loss_func = False,
+            **kwargs,
             ):
 
-        metrics = {}
         if compute_nll:
             # compute the nll for unseen perturbations
             test_samples, test_sim_regime, test_z_idxs, cat = test_data.tensors
             if compare_latents:
                 test_samples = self.z_loc.detach()[test_z_idxs]
+                if latents_sampled:
+                    test_samples = self._get_posterior_dist(test_z_idxs, None, None).rsample()
             if not (cat==2).all():
                 raise TypeError("Data contains non test_data!")
 
             gene_idxs = np.arange(test_samples.shape[1])
-            target_mu = np.median(self.alpha_p.detach().numpy())
-            target_std = np.median(self.sigma_p.detach().numpy())
+            target_mu = kwargs.get("target_mu", np.median(self.alpha_p.detach().numpy()))
+            target_std = kwargs.get("target_std", np.median(self.sigma_p.detach().numpy()))
 
             nlls = []
             contexts = test_sim_regime.unique()
@@ -1433,21 +1447,43 @@ class BICYCLE(pl.LightningModule):
 
                 z_bar, omega = self.predict_perturbation(
                     target_idx = target_idxs, # target index in genes
-                    target_mu=target_mu,
-                    target_std=target_std,
+                    target_mu=[target_mu],
+                    target_std=[target_std],
+                    transform = omega_transform,
                     **kwargs,
                 )
+                if omega_transform != None:
+                    omega = omega_transform(omega)
+                with torch.no_grad():
+                    if not use_loss_func:
+                        if dist == None:
+                            nll = self.test_nll(
+                                z_bar=z_bar,
+                                omega=omega,
+                                samples=samples
+                            )
+                        else:
+                            P = dist(z_bar.detach(), omega.detach())
+                            nll = -1*torch.sum(P.log_prob(samples))
+                            if len(samples.shape)>1:
+                                nll = nll/samples.shape[0]
+                    else:
+                        if dist == None:
+                            mvn = torch.distributions.Normal(loc=z_bar, scale=torch.sqrt(torch.diag(omega)))
+                        else:
+                            mvn = dist(z_bar, omega)
+                        orig_use_latents = self.use_latents
+                        self.use_latents = False
+                        nll = self.compute_nll_loss(samples=samples, sample_idx=None, sim_regime=None, mvn=mvn)
+                        self.use_latents = orig_use_latents
 
-                nll = self.test_nll(
-                    z_bar=z_bar,
-                    omega=omega,
-                    samples=samples
-                )
 
                 nlls.append(nll)
             nll_mean = np.mean(nlls)
             nll_std = np.std(nlls)        
             nll = (nll_mean, nll_std)
+        else:
+            nll = None
         # compute classification metrics
         if compute_class_metrics:
             beta = self.beta.detach()
@@ -1485,7 +1521,8 @@ class BICYCLE(pl.LightningModule):
                 
                 return nll, max_f1, average_precision, auroc, prior_average_precision, prior_auroc
             
-        return nll, max_f1, average_precision, auroc
+            return nll, max_f1, average_precision, auroc
+        return nll
 
     def forward(self, *args, **kwargs):
         raise NotImplementedError()
@@ -1503,3 +1540,57 @@ class BICYCLE(pl.LightningModule):
 
     def on_fit_end(self):
         self.is_fitted = True
+
+    def evaluate_test(
+            self,
+            test_data:TensorDataset,
+            compare_latents = True,
+            compute_nll = True,
+            compute_class_metrics = True,
+            **kwargs
+            ):
+
+        if compute_nll:
+            #transform = torch.distributions.PositiveDefiniteTransform()
+            #transform = torch.distributions.LowerCholeskyTransform()
+            # compute the nll for unseen perturbations
+            test_samples, test_sim_regime, test_z_idxs, cat = test_data.tensors
+            if compare_latents:
+                test_samples = self.z_loc.detach()[test_z_idxs]
+            if not (cat==2).all():
+                raise TypeError("Data contains non test_data!")
+
+            gene_idxs = np.arange(test_samples.shape[1])
+            target_mu = kwargs.get("target_mu", np.median(self.alpha_p.detach().numpy()).tolist())
+            target_std = kwargs.get("target_std", np.median(self.sigma_p.detach().numpy()).tolist())
+
+            nlls = []
+            contexts = test_sim_regime.unique()
+            for context in contexts:
+                mask = test_sim_regime == context
+                samples = test_samples[mask]
+                idxs = test_z_idxs[mask]
+
+                target_idxs = gene_idxs[self.gt_interv[:,context].T.to(bool)]
+
+                z_bar, omega = self.predict_perturbation(
+                    target_idx = target_idxs, # target index in genes
+                    target_mu=[target_mu],
+                    target_std=[target_std],
+                    **kwargs,
+                )
+                #omega = transform(omega)
+                #omega = omega + omega.Tearly
+                with torch.no_grad():
+                    use_latents_orig = self.use_latents
+                    self.use_latents = False
+                    zs = self._get_posterior_dist(idxs, None, None).rsample()
+                    mvn = torch.distributions.MultivariateNormal(loc = z_bar, covariance_matrix=omega)
+                    nll = self.compute_nll_loss(
+                        zs, None, None,mvn=mvn)
+                    self.use_latents = use_latents_orig
+                    nlls.append(nll)
+            nll_mean = np.mean(nlls)
+            nll_std = np.std(nlls)
+            nll = (nll_mean, nll_std)
+            return nll

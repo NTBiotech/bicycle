@@ -32,7 +32,7 @@ import pickle
 DATA_PATH = Path("/data/toulouse/bicycle/notebooks/experiments/masking/data")
 
 SEED = 1
-GPU_DEVICES = [1]
+GPU_DEVICES = [0]
 monitor_stats = False
 profile = False
 CHECKPOINTING = True
@@ -52,7 +52,7 @@ trad_loading=True
 # masking
 masking_mode = "loss"
 bin_prior = False
-scale_mask = 1
+scale_mask = 0.0001
 parameter_set = "params5"
 grn_noise_factor = 0.5
 normalize_mask = False
@@ -62,9 +62,11 @@ data_source = "create_data"
 #scMultiSim
 data_id = "data_run000"
 # erdos renyi
-data_sem="linear-ou"
+data_sem="linear"
 
 # training
+model_use_latents = True    # determines if latent representation is learned
+
 validation_size = 0.2
 
 batch_size = 10000
@@ -72,7 +74,7 @@ n_epochs = 10000
 n_epochs_pretrain_latents = 1000
 
 # testing
-evaluate = True
+evaluate = False
 
 if masking_mode != "loss" and bin_prior:
     raise NotImplementedError("masking mode must be loss for bin_prior")
@@ -126,7 +128,7 @@ if data_source == "create_data":
     data_make_counts=True
     data_train_gene_ko=list(np.arange(0, data_n_genes, 1).astype(str))
     data_test_gene_ko = []
-    while len(data_test_gene_ko)<= data_n_genes*2:
+    while len(data_test_gene_ko)< data_n_genes*2:
         data_test_gene_ko.append(tuple(np.random.choice(data_n_genes, size=2, replace=False).astype(str)))
         data_test_gene_ko=list(set(data_test_gene_ko))
     data_test_gene_ko = [f"{x[0]},{x[1]}" for x in data_test_gene_ko]
@@ -205,17 +207,19 @@ if data_source == "create_data":
         if normalize_mask:
             bayes_prior = bayes_prior/np.max(bayes_prior)
         bayes_prior = torch.tensor(bayes_prior)
-
+elif data_source == "create_data_scMultiSim":
+    
+    pass
 elif data_source == "scMultiSim":
     if evaluate:
         raise NotImplementedError("Testing on scMultiSim data not implemented!")
     # get data from data_path
     # to define: samples (samples x genes), gt_interv (genes x contexts), sim_regime (intervened_variables = gt_interv[:, sim_regime].transpose(0, 1)), beta (n_genes x n_genes)
-    
+    raise DeprecationWarning("scMultiSim as data source is deprecated! Use 'create_data_scMultiSim instead!")
     # get gt_beta
     sms_path = DATA_PATH/"scMultiSim_data"/data_id
     parameters_path = DATA_PATH/"parameters" / (parameter_set + ".pickle")
-    grn = pd.read_csv(sms_path/"unperturbed_data"/"geff.csv", index_col=0)
+    grn = pd.read_csv(sms_path/"unperturbed_data"/"geff.csv", index_col=0).T
     TFs = grn.columns.to_list()
     rna = sc.read_h5ad(sms_path/"ready_full_rna.h5ad")
     atac = sc.read_h5ad(sms_path/"ready_full_atac.h5ad")
@@ -411,7 +415,6 @@ elif masking_loss:
 model_use_encoder = False
 model_gt_beta = beta
 
-model_use_latents = True    # determines if z_kl loss is calculated during training
 model_covariates = None
 model_n_factors = 0
 model_intervention_type = "Cas9"
@@ -659,11 +662,12 @@ pd.DataFrame(globals().items()).to_csv(PLOTS_PATH/"globals.csv")
 if evaluate:
     model.to(data_device)
     if masking_loss:
-        nll, max_f1, average_precision, auroc, prior_average_precision =  model.evaluate(test_loader.dataset)
-        print(f"nll:{nll}, max_f1:{max_f1}, average_precision:{average_precision}, auroc:{auroc}, prior_average_precision:{prior_average_precision}")
+        nll, max_f1, average_precision, auroc, prior_average_precision, prior_auc =  model.evaluate(test_loader.dataset)
+        print(f"nll:{nll}, max_f1:{max_f1}, average_precision:{average_precision}, auroc:{auroc}, prior_average_precision:{prior_average_precision}, prior_auc:{prior_auc}")
     else:
         nll, max_f1, average_precision, auroc =  model.evaluate(test_loader.dataset)
         print(f"nll: {nll}, max_f1: {max_f1}, average_precision: {average_precision}, auroc: {auroc}")
+
 
 
 # log the environment
