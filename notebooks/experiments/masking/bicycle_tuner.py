@@ -32,7 +32,9 @@ from bicycle.dictlogger import DictLogger
 import pickle
 import shutil
 import gc
+import ray
 from ray import tune
+from ray.tune.utils import wait_for_gpu
 from ray.tune.schedulers import ASHAScheduler
 from ray.tune.search.bayesopt import BayesOptSearch
 from ray.train.torch import TorchTrainer
@@ -44,7 +46,7 @@ from ray.train.lightning import (
     RayTrainReportCallback,
     prepare_trainer,
 )
-
+from datetime import timedelta
 
 
 
@@ -56,7 +58,7 @@ GPU_DEVICES = [0]
 early_stopping = False
 
 # masking
-masking_mode = None
+masking_mode = "loss"
 bin_prior = False
 scale_mask = 1
 parameter_set = "params5"
@@ -103,29 +105,26 @@ print("Setting output paths...")
 
 OUT_PATH = DATA_PATH/"model_runs"
 MODELS_PATH = OUT_PATH/"models"
-PLOTS_PATH = OUT_PATH/"plots"
 
 print("Creating output directories...")
-for directory in [MODELS_PATH, PLOTS_PATH]:
-    if not directory.exists():
-        directory.mkdir(parents=True, exist_ok=True)
+if not MODELS_PATH.exists():
+    MODELS_PATH.mkdir(parents=True, exist_ok=True)
 
 # assign id to run
 run_id = get_id(MODELS_PATH, prefix="tuner_run_", id_length=3)
 
-for directory in [MODELS_PATH, PLOTS_PATH]:
-    if not directory.joinpath(run_id).exists():
-        directory.joinpath(run_id).mkdir(parents=True, exist_ok=True)
+if not MODELS_PATH.joinpath(run_id).exists():
+    MODELS_PATH.joinpath(run_id).mkdir(parents=True, exist_ok=True)
 
 MODELS_PATH = OUT_PATH.joinpath("models", run_id)
-PLOTS_PATH = OUT_PATH.joinpath("plots", run_id)
-print(f"Output paths are: {str(MODELS_PATH)} and {str(PLOTS_PATH)}!")
+print(f"Output path is: {str(MODELS_PATH)}!")
 
 # add a copy of the protocoll to the dest path
 shutil.copy(__file__, MODELS_PATH)
 
 
 
+n_workers = 5
 data_device=torch.device("cpu")
 data_train_gene_ko=[str(s) for s in range(data_n_genes)]
 data_test_gene_ko = []
@@ -199,7 +198,7 @@ if data_source == "create_data":
         test_gene_ko=data_test_gene_ko,
         persistent_workers=False,
         covariates=None,
-        num_workers= 1,
+        num_workers= n_workers,
 
     )
     model_n_genes = samples.shape[1]
@@ -282,7 +281,7 @@ elif data_source == "create_data_scMultiSim":
         test_gene_ko=data_test_gene_ko,
         persistent_workers=False,
         covariates=None,
-        num_workers= 1,
+        num_workers= n_workers,
 
     )
     model_n_genes = data_n_genes
@@ -354,7 +353,7 @@ elif data_source == "scMultiSim":
         validation_size=validation_size,
         device=data_device,
         seed=SEED,
-        num_workers=loader_workers,
+        num_workers=n_workers,
         persistent_workers=False,
         traditional=trad_loading
         )
@@ -449,7 +448,7 @@ elif data_source == "create_data_from_grn":
         test_gene_ko=data_test_gene_ko,
         persistent_workers=False,
         covariates=None,
-        num_workers= 1,
+        num_workers= n_workers,
     )
     model_n_genes = samples.shape[1]
     model_n_samples = samples.shape[0]
@@ -508,13 +507,26 @@ model_mask_genes = []
 # training variables
 swa = 100                                         # hyperparameter
 # how often to caculate nll for validation
-check_val_every_n_epoch = 100
+check_val_every_n_epoch = 1
 log_every_n_steps = 100
 
-
 def train_bicycle(config):
+    
+    empty_report = {
+        "final_nll":np.nan,
+        "final_max_f1":np.nan,
+        "final_average_precision":np.nan,
+        "final_auroc":np.nan,
+        "nll":np.nan,
+        "average_precision":np.nan,
+        "avg_train_loss":np.nan,
+        "avg_valid_loss":np.nan,
+        }
 
-    tune.report({"nll":np.nan, "avg_train_loss":np.nan})
+    context = tune.get_context()
+    trial_dir = tuner_path.glob("train_bicycle*").__next__()/Path(context.get_trial_dir()).name
+    print(f"\n\n Trial directory: {trial_dir}")
+    tune.report(empty_report)
     
     samples = np.load(os.path.join(MODELS_PATH.joinpath("synthetic_data"), "check_sim_samples.npy"))
     sim_regime = np.load(os.path.join(MODELS_PATH.joinpath("synthetic_data"), "check_sim_regimes.npy"))
@@ -538,7 +550,7 @@ def train_bicycle(config):
         test_gene_ko=data_test_gene_ko,
         persistent_workers=False,
         covariates=None,
-        num_workers= 1,
+        num_workers= n_workers,
     )
 
 
@@ -593,7 +605,8 @@ def train_bicycle(config):
         mask_genes = model_mask_genes,
         bayes_prior=None if not masking_loss else bayes_prior.to(model_device),
         scale_mask=0 if not masking_loss else scale_mask,
-        hamming_distance=bin_prior
+        hamming_distance=bin_prior,
+        metrics_to_report=empty_report
     )
     
     torch.compile(model=model)
@@ -639,7 +652,7 @@ def train_bicycle(config):
             num_sanity_val_steps=0,
             callbacks=pretrain_callbacks,
             gradient_clip_val=gradient_clip_val,
-            default_root_dir=str(MODELS_PATH),
+            default_root_dir=trial_dir,
             gradient_clip_algorithm="norm",
             deterministic= "warn",
         )
@@ -670,7 +683,7 @@ def train_bicycle(config):
         num_sanity_val_steps=0,
         callbacks=callbacks,
         gradient_clip_val=gradient_clip_val,
-        default_root_dir=str(MODELS_PATH),
+        default_root_dir=trial_dir,
         gradient_clip_algorithm="norm",
         deterministic= "warn",
     )
@@ -685,24 +698,29 @@ def train_bicycle(config):
     training_time = float(end_time - start_time)
     print(f"Training took {training_time} seconds.")
 
-    nll, max_f1, average_precision, auroc = model.evaluate(test_loader.dataset)
-    tune.report({
-        "final_nll":nll,
-        "final_max_f1":max_f1,
-        "final_average_precision":average_precision,
-        "final_auroc":auroc
-        })
-
+    nll, max_f1, average_precision, auroc, prior_average_precision, prior_auroc = model.evaluate(test_loader.dataset)
+    empty_report.update({
+        "final_nll":nll.cpu().numpy(),
+        "final_max_f1":max_f1.cpu().numpy(),
+        "final_average_precision":average_precision.cpu().numpy(),
+        "final_auroc":auroc.cpu().numpy()}
+        )
+    print(empty_report)
+    tune.report(empty_report)
+    del nll, max_f1, average_precision, auroc, prior_average_precision, prior_auroc
     del trainer, model, train_loader, validation_loader, test_loader
     torch.cuda.empty_cache()
     gc.collect()
 
+ray.init()
 
 os.environ["TUNE_DISABLE_STRICT_METRIC_CHECKING"] = "1"
 #os.environ["RAY_memory_monitor_refresh_ms"] = "0"
+os.environ["RAY_memory_usage_threshold"] = str(0.99)
 
 
 metric = "nll"
+time_budget = timedelta(hours=10)
 tuner_path = MODELS_PATH/"tune_results"
 tuner_path.mkdir()
 
@@ -727,29 +745,43 @@ run_config = RunConfig(
 
 bayes_opt_search = BayesOptSearch(metric=metric, mode = "min")
 
+def trial_name_creator(trial):
+    return f"{trial.trainable_name}_{trial.trial_id}"
+
 tune_config=tune.TuneConfig(
-    num_samples=100,
-    scheduler=ASHAScheduler(grace_period=10, max_t=int(n_epochs*check_val_every_n_epoch)),
+    #num_samples=100,
+    scheduler=ASHAScheduler(grace_period=10, stop_last_trials=False),
     search_alg=bayes_opt_search,
     max_concurrent_trials=2,
     metric=metric,
-    mode = "min",    
+    mode = "min", 
+    reuse_actors=False,
+    trial_dirname_creator= trial_name_creator,
+    time_budget_s=time_budget
 )
 
-trainable = tune.with_resources(train_bicycle, resources = {"cpu":1, "gpu":0.5})
+train_with_recources = tune.with_resources(train_bicycle, resources = {"cpu":n_workers, "gpu":1})
+
+def trainable(config):
+    wait_for_gpu()
+    return train_with_recources(config)
+
 tuner = tune.Tuner(
-    trainable=trainable,
+    trainable=train_with_recources,
     param_space={"train_loop_config": search_space},
     tune_config=tune_config,
     run_config=run_config,
 )
 results = tuner.fit()
 
+
 results.get_dataframe(filter_metric=metric).to_csv(MODELS_PATH/"results_df.csv")
-best_result = results.get_best_result(metric=metric, mode="min")
-print(best_result)
-best_result.metrics_dataframe.to_csv(MODELS_PATH/"best_metrics.csv")
 dfs = {result.path: result.metrics_dataframe for result in results}
 [d.nll.plot() for d in dfs.values() if metric in d.columns]
 # log the environment
-pd.DataFrame(globals().items()).to_csv(PLOTS_PATH/"globals.csv")
+best_result = results.get_best_result(metric="final_" + metric, mode="min")
+print(best_result)
+best_result.metrics_dataframe.to_csv(MODELS_PATH/"best_metrics.csv")
+pd.DataFrame(globals().items()).to_csv(MODELS_PATH/"globals.csv")
+
+ray.shutdown()

@@ -53,6 +53,8 @@ from torch.special import expit
 from bicycle.utils.training import EarlyStopperTorch, lyapunov_direct
 from bicycle.utils.mask_utils import get_sparsity
 from ray.tune import report
+import gc
+
 def init_weights(m):
     """
     Initializes the weights of a given neural network layer using Xavier normal initialization
@@ -252,6 +254,7 @@ class BICYCLE(pl.LightningModule):
         bayes_prior: torch.Tensor = None,
         scale_mask: float = 0.0,
         hamming_distance :bool = False,
+        metrics_to_report:dict = {}
     ):
         """
         Initializes the Bicycle model as a subclass of pl.LightningModule.
@@ -380,6 +383,7 @@ class BICYCLE(pl.LightningModule):
             )
 
         # loss list for tuner
+        self.metrics_to_report = metrics_to_report
         self.validation_step_outputs = []
         self.train_step_outputs = []
 
@@ -569,6 +573,16 @@ class BICYCLE(pl.LightningModule):
                 "lr_scheduler": scheduler,
                 "monitor": "train_loss",
             }
+
+    def update_tune_report(self, report_dict):
+        """Wrapper of dict.update() method to filter out unwanted metrics"""
+        for key, metric in report_dict.items():
+            if key in self.tune_report.keys():
+                if isinstance(metric, Tensor):
+                    if metric.device != "cpu":
+                        metric = metric.cpu()
+                    metric = metric.numpy()
+                self.tune_report[key] = metric
 
     def get_updated_states(self):
         """
@@ -1209,18 +1223,23 @@ class BICYCLE(pl.LightningModule):
 
         if self.train_only_likelihood:
             loss = neg_log_likelihood
+        
+        gc.collect()
 
         return loss
 
     def validation_step(self, batch, batch_idx):
         loss = self.training_step(batch, batch_idx)
-        
+
         nll, precision = self.evaluate_batch(
             batch,
             compare_latents = False,
             compute_class_metrics=True
             )
-        report({"nll":nll.cpu().numpy(), "average_precision":precision.cpu().numpy()})
+
+        self.update_tune_report({"nll":nll,
+                            "average_precision":precision})
+    
         return loss
 
     def predict_percentages(self, batch):
@@ -1455,11 +1474,11 @@ class BICYCLE(pl.LightningModule):
             target_std = kwargs.get("target_std", torch.median(self.sigma_p.detach()))
 
             nlls = []
-            contexts = test_sim_regime.unique()
+            contexts = test_sim_regime.unique().to(self.device)
             for context in contexts:
                 mask = test_sim_regime == context
                 samples = test_samples[mask]
-                target_idxs = gene_idxs[self.gt_interv[:,context].to(bool)]
+                target_idxs = gene_idxs[self.gt_interv[:,context].to(self.device).to(bool)]
 
                 z_bar, omega = self.predict_perturbation(
                     target_idx = target_idxs, # target index in genes
@@ -1505,7 +1524,7 @@ class BICYCLE(pl.LightningModule):
             beta = self.beta.detach()
             if beta.device != "cpu":
                 beta = beta.cpu()
-            grn = self.gt_beta
+            grn = self.gt_beta.cpu()
             grn = grn.flatten()
             beta = beta.flatten()
             # normalize to [0, 1]
@@ -1534,12 +1553,18 @@ class BICYCLE(pl.LightningModule):
                 prior_average_precision = average_precision_score(prior, grn)
                 prior_auroc = auroc_score(prior, grn)
 
-                
-                return nll, max_f1, average_precision, auroc, prior_average_precision, prior_auroc
-            
-            return nll, max_f1, average_precision, auroc
-        return nll
-    
+            else:
+                prior_average_precision = None
+                prior_auroc = None
+
+        else:
+            nll = None
+            max_f1 = None
+            average_precision = None
+            auroc = None
+
+        return nll, max_f1, average_precision, auroc, prior_average_precision, prior_auroc
+        
     def evaluate_batch(
             self,
             batch:list,
@@ -1651,7 +1676,8 @@ class BICYCLE(pl.LightningModule):
     def on_validation_epoch_end(self):
         avg_loss = torch.stack(self.validation_step_outputs).mean()
         self.log("avg_valid_loss", avg_loss)
-        #report({"avg_valid_loss": avg_loss.item(), "nll":np.nan})
+        self.update_tune_report({"avg_valid_loss": avg_loss})
+        report(self.tune_report)
         if self.early_stopping:
             if self.earlystopper.step(avg_loss):
                 print(f"Earlystopping due to convergence at step {self.current_epoch}")
@@ -1659,13 +1685,16 @@ class BICYCLE(pl.LightningModule):
 
         self.validation_step_outputs.clear()
 
-    def on_train_epoch_end(self):
-        #avg_loss = torch.stack(self.train_step_outputs).mean()
-        #self.log("avg_train_loss", avg_loss)
-        #report({"avg_train_loss": avg_loss.item(), "nll":np.nan})
-        #
-        #self.train_step_outputs.clear()
-        pass
+    #def on_train_epoch_end(self):
+    #    avg_loss = torch.stack(self.train_step_outputs).mean()
+    #    self.log("avg_train_loss", avg_loss)
+    #    #report(self.report)
+    #    #
+    #    self.train_step_outputs.clear()
+    #    pass
+
+    def on_validation_epoch_start(self):
+        self.tune_report = self.metrics_to_report.copy()
 
     def on_fit_end(self):
         self.is_fitted = True
