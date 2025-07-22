@@ -19,13 +19,13 @@ from scipy.stats import ttest_rel
 def generate_data(
         n_genes:int,
         grn_params:dict,
-        grn_shape,
-        n_samples_control:int = 0,
+        n_samples_control:int = 500,
         n_samples_per_pert:int = 250,
         train_gene_ko:list = [],
         test_gene_ko:list = [],
         pert_type:str = "dCas9",
         pert_strength:float = 0.01,
+        grn_shape:tuple = (0,0),
         add_noise:bool = False,
         add_batch:bool = False,
         cache_path:Path = Path("./scMultiSim_cache/"),
@@ -34,12 +34,10 @@ def generate_data(
         normalize:bool = False,
         pseudocounts = False,
         generate_graph = True,
-        mask_kwargs:dict = {},
-        psd = True,
         graph_kwargs = {},
         verbose = False,
-        sem_regime = "pert_grn",
-
+        sem = "pert_grn",
+        mask_kwargs = {},
 ):
     """Function to generate perturbed scRNA data using scMultiSim."""
 
@@ -81,7 +79,9 @@ def generate_data(
     
 
     os.chdir(scMultiSim.parent.as_posix())
-    cache_path = Path(cache_path.parent/get_id(cache_path.parent,2,cache_path.name+"_"))
+    if cache_path.exists():
+        print(f"cache path {cache_path} exists.")
+        cache_path = Path(cache_path.parent/get_id(cache_path.parent,2,cache_path.name+"_"))
     cache_path.mkdir()
     
     # generate a grn
@@ -93,7 +93,6 @@ def generate_data(
                 graph_type="erdos-renyi",
                 nodes=n_genes,
                 edge_assignment="random-uniform",
-                make_contractive=True,
                 **graph_kwargs,
             )
             beta = torch.tensor(np.abs(beta)).float()
@@ -104,7 +103,6 @@ def generate_data(
             if np.all(eigvals_B > 0):
                 unsuccessful_sampling = False
                 beta = beta.numpy()
-                print(beta)
             else:
                 print("*" * 100)
                 print("Unsuccessful sampling. Re-sampling...")
@@ -116,7 +114,6 @@ def generate_data(
             grn_params=grn_params,
             eigenvalues=True,
             distribute_TFs=False,
-            psd=psd,
             out_path=cache_path,
             verbose=verbose,
             **graph_kwargs
@@ -146,7 +143,7 @@ def generate_data(
             gt_interv[int(p), idx] = 1
 
 
-    if sem_regime == "pert_cif":
+    if sem == "pert_cif":
         # make matrices to multiply with cif matrices
         n_samples = n_samples_control + len(contexts)*n_samples_per_pert
         n_cifs = 50
@@ -163,12 +160,12 @@ def generate_data(
             np.savetxt(cache_path/f"cif_{name}_mod.csv", cif, delimiter=",")
         intervention = "TRUE"
 
-    elif sem_regime == "pert_grn":
+    elif sem == "pert_grn":
         n_samples = n_samples_control
         intervention = "FALSE"
 
     else:
-        raise NotImplementedError(f"sem_regime '{sem_regime}' not implemented! Please use one of ['pert_grn', 'pert_cif'].")
+        raise NotImplementedError(f"sem '{sem}' not implemented! Please use one of ['pert_grn', 'pert_cif'].")
 
 
     if n_samples >0:
@@ -202,7 +199,7 @@ def generate_data(
         region_to_gene = pd.read_csv(cache_path/"R_out"/"region_to_gene.csv", index_col=0).to_numpy()
         region_to_tf = pd.read_csv(cache_path/"R_out"/"region_to_tf.csv", index_col=0).to_numpy()
 
-    if sem_regime == "pert_grn":
+    if sem == "pert_grn":
         # generate perturbed data
         for n, context in enumerate(gt_interv.T[1:].astype(bool)):
             pert_grn = beta.copy()
@@ -242,11 +239,14 @@ def generate_data(
         full_rna = normalize_data(full_rna)
 
     mask = None
+    precision = None
     if create_mask:
         full_atac = pd.read_csv(cache_path/"atac_matrix.csv", index_col=0)
         full_atac = full_atac.reset_index(drop=True).to_numpy()
         if normalize:
             full_atac = normalize_data(full_atac, scale=False)
+        if verbose:
+            print("mask_kwargs: ",(mask_kwargs))
 
         mask = get_mask2(
             atac=full_atac[(sim_regime == 0)[:len(full_atac)]].T,
@@ -269,12 +269,12 @@ def generate_data(
                     mask = np.pad(mask, pad, mode = "minimum")
                     print("mask is smaller than grn! Consider using pseudocounts.")
                 if m > b:
-                    print("mask is bigger than grn! Check RNA trimming was correct.")
+                    print("mask is bigger than grn! Check RNA and gt_interv trimming was correct.")
                     if n:
                         mask = mask[:,:b-m]
                     else:
                         mask = mask[:b-m]
-                    full_rna = full_rna[:,:b-m]
+                    
 
         if verbose and not generate_graph:
             with open(cache_path/"generation_kwargs.json", "r") as rf:
@@ -284,6 +284,9 @@ def generate_data(
             fig = plot_comparison(mask, geff, dist)
             fig.savefig(cache_path/"geff_vs_mask.pdf")
             fig.show()
+            np.savetxt(cache_path/"mask.csv", mask, delimiter = ",")
+            np.savetxt(cache_path/"full_atac.csv", full_atac, delimiter = ",")
+
 
         y_true = beta > 0.001
 
@@ -292,8 +295,10 @@ def generate_data(
         mask_eval = expit((mask-np.mean(mask))/np.std(mask))
         precision = average_precision_score(y_true, mask_eval.flatten())
         print("average precision vs beta: ",precision)
-
-
+        mask = mask.T
+        beta = beta.T
+    if full_rna.shape[1] != n_genes:
+        full_rna = full_rna[:,:n_genes-full_rna.shape[1]]
     if verbose:
         def st_hist(ax, X, label=None, color=None, **kwargs):
             return ax.hist(X, label=label, 
@@ -305,7 +310,7 @@ def generate_data(
         print("Checking perturbation effects...")
         # test if change in expression is significant for each gene in each dataset for each condition against normal
         results = np.empty(len(contexts))
-        grn = beta.T
+        beta
         alpha = 0.05
         ci = list()
         print("na count:",np.isnan(full_rna).sum())
@@ -319,7 +324,7 @@ def generate_data(
         fig.suptitle("Perturbation effects")
         for n, context in enumerate(gt_interv.T[1:].astype(bool)):
             p_values = list()
-            weights = np.sum(grn[context], axis=0)
+            weights = np.sum(beta[context], axis=0)
             down_mask = weights>0.1
             downstream_genes = genes[down_mask]
             if len(downstream_genes) == 0:
@@ -348,7 +353,7 @@ def generate_data(
             print(f"Proportion of significant\ndifference in expression {np.mean(p_values).round(3)} for target: {contexts[n]} with downstream: {downstream_genes}")
             ax[n].legend(loc="upper right")
             results[n] = np.mean(p_values).round(3)
-        ax[n+1].imshow(grn, aspect = "auto")
+        ax[n+1].imshow(beta, aspect = "auto")
         fig.set_figwidth((len(contexts)+1)*2)
         fig.show()
         fig.savefig(cache_path/"pert_effects.pdf")
@@ -359,10 +364,67 @@ def generate_data(
         os.system(f"rm -r {cache_path}")
     else:
         # clear R_out
-        os.system(f"rm -r {cache_path/"R_out"}")
+        np.savetxt(cache_path/"beta.csv", beta, delimiter = ",")
+        np.savetxt(cache_path/"full_rna.csv", full_rna, delimiter = ",")
+        os.system(f"rm -r {cache_path/'R_out'}")
+
+    return  precision, mask, full_rna, gt_interv, sim_regime, beta
 
 
-
-    return  precision, mask.T, full_rna, gt_interv, sim_regime, beta.T
-
-
+#
+#n_genes = 10
+#grn_shape = (0,0)
+#grn_params = {"sparsity":0.8}
+#n_samples_control = 500
+#n_samples_per_pert = 250
+#
+#train_gene_ko=[str(s) for s in range(n_genes)]
+#print(f"train_gene_ko: {train_gene_ko}")
+#test_gene_ko = []
+#while len(test_gene_ko)< n_genes*2:
+#    test_gene_ko.append(tuple(np.random.choice(n_genes, size=2, replace=False).astype(str)))
+#    test_gene_ko=list(set(test_gene_ko))
+#test_gene_ko = [f"{x[0]},{x[1]}" for x in test_gene_ko]
+#print(f"test_gene_ko: {test_gene_ko}")
+#
+#pert_type = "dCas9"
+#pert_strength = 0
+#cache_path = Path("./scMultiSim_cache/")
+#scMultiSim = Path("./scMS.R")
+#create_mask = True
+#normalize = True
+#pseudocounts = True
+#generate_graph = False
+#verbose = True
+#mask_kwargs = {}
+#graph_kwargs ={}# {"fit_to_standard" : True,
+#        #"standard_grn_path" : "../old_data/run_04/geff.csv",
+#        #"sample_connections" : True}
+##TODO:
+## Replicate optimization.ipynb classification
+## remove perturbed from mask
+##
+#
+#precision, mask, full_rna, gt_interv, sim_regime, beta = generate_data(
+#        n_genes = n_genes,
+#        grn_shape = grn_shape,
+#        grn_params = grn_params,
+#        n_samples_control = n_samples_control,
+#        n_samples_per_pert = n_samples_per_pert,
+#        train_gene_ko = train_gene_ko,
+#        test_gene_ko = test_gene_ko,
+#        pert_type = pert_type,
+#        pert_strength = pert_strength,
+#        cache_path = cache_path,
+#        scMultiSim = scMultiSim,
+#        create_mask = create_mask,
+#        normalize=normalize,
+#        pseudocounts = pseudocounts,
+#        mask_kwargs = mask_kwargs,
+#        generate_graph=generate_graph,
+#        graph_kwargs=graph_kwargs,
+#        verbose = verbose,
+#        sem_regime = "pert_cif"
+#)
+#
+#

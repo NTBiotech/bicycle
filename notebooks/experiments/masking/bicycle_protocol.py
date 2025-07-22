@@ -19,7 +19,7 @@ from pytorch_lightning.loggers import Logger, CSVLogger
 import scanpy as sc
 
 
-from bicycle.utils.data import create_data, create_loaders, get_diagonal_mask
+from bicycle.utils.data import create_data, create_loaders, get_diagonal_mask, create_data_from_grn
 from bicycle.utils.general import get_id
 from bicycle.utils.plotting import plot_training_results
 from bicycle.callbacks import (
@@ -27,12 +27,10 @@ from bicycle.callbacks import (
     GenerateCallback,
     MyLoggerCallback,
 )
-from bicycle.utils.mask_utils import format_data, get_sparsity
+from bicycle.utils.mask_utils import format_data, get_sparsity, normalize_tensor
 from bicycle.dictlogger import DictLogger
 import pickle
 import shutil
-
-
 
 DATA_PATH = Path("/data/toulouse/bicycle/notebooks/experiments/masking/data")
 
@@ -41,7 +39,7 @@ GPU_DEVICES = [0]
 monitor_stats = False
 profile = False
 CHECKPOINTING = True
-early_stopping = True
+early_stopping = False
 progressbar_rate = 0
 # model
 compile = True
@@ -49,31 +47,44 @@ compiler_kwargs = {}
 compiler_fullgraph = False
 compiler_dynamic = False
 compiler_mode = None
-loader_workers=5
+loader_workers=1
 trainer_precision=32
 matmul_precision="high"
 trad_loading=True
 
 # masking
-masking_mode = "loss"
+masking_mode = None
 bin_prior = False
 scale_mask = 1
 parameter_set = "params5"
-grn_noise_factor= 2
+grn_noise_factor = 0.5
 normalize_mask = False
 # data
-create_new_data = False
-scale_factor = 1
-#scMultiSim
-data_id = "data_run003"
+data_source = "create_data"
+data_sem="linear"
+
+# scMultiSim
+scMultiSim_path = DATA_PATH.parent/"scMS.R"
+data_id = "data_run000"
+
+# needs to be a round number
+data_n_genes = 10
+# need to be greater than 1
+data_n_samples_control = 500
+data_n_samples_per_perturbation = 250
+data_verbose=True
 
 # training
+model_use_latents = False    # determines if latent representation is learned
+
 validation_size = 0.2
 
-batch_size = 5000
+batch_size = 10000
 n_epochs = 10000
 n_epochs_pretrain_latents = 1000
 
+# testing
+evaluate = False
 
 if masking_mode != "loss" and bin_prior:
     raise NotImplementedError("masking mode must be loss for bin_prior")
@@ -98,23 +109,19 @@ print("Setting output paths...")
 
 OUT_PATH = DATA_PATH/"model_runs"
 MODELS_PATH = OUT_PATH/"models"
-PLOTS_PATH = OUT_PATH/"plots"
 
 print("Creating output directories...")
-for directory in [MODELS_PATH, PLOTS_PATH]:
-    if not directory.exists():
-        directory.mkdir(parents=True, exist_ok=True)
+if not MODELS_PATH.exists():
+    MODELS_PATH.mkdir(parents=True, exist_ok=True)
 
 # assign id to run
 run_id = get_id(MODELS_PATH, prefix="run_", id_length=3)
 
-for directory in [MODELS_PATH, PLOTS_PATH]:
-    if not directory.joinpath(run_id).exists():
-        directory.joinpath(run_id).mkdir(parents=True, exist_ok=True)
+if not MODELS_PATH.joinpath(run_id).exists():
+    MODELS_PATH.joinpath(run_id).mkdir(parents=True, exist_ok=True)
 
 MODELS_PATH = OUT_PATH.joinpath("models", run_id)
-PLOTS_PATH = OUT_PATH.joinpath("plots", run_id)
-print(f"Output paths are: {str(MODELS_PATH)} and {str(PLOTS_PATH)}!")
+print(f"Output path is: {str(MODELS_PATH)}!")
 
 # add a copy of the protocoll to the dest path
 shutil.copy(__file__, MODELS_PATH)
@@ -123,37 +130,38 @@ if not trad_loading:
     validation_size=0
 data_device=torch.device("cpu")
 
-if create_new_data:
+
+data_train_gene_ko=[str(s) for s in range(data_n_genes)]
+data_test_gene_ko = []
+while len(data_test_gene_ko)< data_n_genes*2:
+    data_test_gene_ko.append(tuple(np.random.choice(data_n_genes, size=2, replace=False).astype(str)))
+    data_test_gene_ko=list(set(data_test_gene_ko))
+data_test_gene_ko = [f"{x[0]},{x[1]}" for x in data_test_gene_ko]
+data_intervention_type="Cas9"
+data_graph_kwargs = {
+    "abs_weight_low": 0.25,
+    "abs_weight_high": 0.95,
+    "p_success": 0.5,
+    "expected_density": 2,
+    "noise_scale": 0.5,
+    "intervention_scale": 0.1,
+}
+
+
+if data_source == "create_data":
     # create synthetic data
     ## parameters for data creation with prefix data
     print("Setting data creation parameters...")
-    data_n_genes = 110 # needs to be a round number
-    data_n_samples_control = 5000
-    data_n_samples_per_perturbation = 10
+    
     data_make_counts=True
-    data_train_gene_ko=list(np.arange(0, data_n_genes, 1).astype(str))
-    data_test_gene_ko = []
-    while len(data_test_gene_ko)<= data_n_genes*2:
-        data_test_gene_ko.append(tuple(np.random.choice(data_n_genes, size=2, replace=False).astype(str)))
-        data_test_gene_ko=list(set(data_test_gene_ko))
-    data_test_gene_ko = [f"{x[0]},{x[1]}" for x in data_test_gene_ko]
 
     data_graph_type="erdos-renyi"
     data_edge_assignment="random-uniform"
-    data_sem="linear-ou"
-    data_make_contractive=True
-    data_verbose=True
-    data_intervention_type="Cas9"
+    data_make_contractive=True    
     data_T=1.0
     data_library_size_range=[10 * data_n_genes, 100 * data_n_genes]
-    data_graph_kwargs = {
-        "abs_weight_low": 0.25,
-        "abs_weight_high": 0.95,
-        "p_success": 0.5,
-        "expected_density": 2,
-        "noise_scale": 0.5,
-        "intervention_scale": 0.1,
-    }
+    
+
     print("Creating synthetic data...")
     gt_dyn, intervened_variables, samples, gt_interv, sim_regime, beta = create_data(
         n_genes = data_n_genes,
@@ -173,27 +181,29 @@ if create_new_data:
         library_size_range = data_library_size_range,
         **data_graph_kwargs,
     )
-    # save data for later validation Commented for profiling TODO: uncomment
-    # print(f"Saving data at {str(MODELS_PATH.joinpath("synthetic_data"))}...")
-    '''MODELS_PATH.joinpath("synthetic_data").mkdir(parents=True, exist_ok=True)
+    samples = normalize_tensor(samples)
+    # save data for later validation
+    print(f"Saving data at {str(MODELS_PATH.joinpath('synthetic_data'))}...")
+    MODELS_PATH.joinpath("synthetic_data").mkdir(parents=True, exist_ok=True)
     np.save(os.path.join(MODELS_PATH.joinpath("synthetic_data"), "check_sim_samples.npy"), samples)
     np.save(os.path.join(MODELS_PATH.joinpath("synthetic_data"), "check_sim_regimes.npy"), sim_regime)
     np.save(os.path.join(MODELS_PATH.joinpath("synthetic_data"), "check_sim_beta.npy"), beta)
     np.save(os.path.join(MODELS_PATH.joinpath("synthetic_data"), "check_sim_gt_interv.npy"), gt_interv)
-    '''
-    # TODO: create check for already existing runs
+
     # initialize data loaders
     print("Initializing Dataloaders...")
     
-    train_loader, validation_loader, test_loader = create_loaders(samples=samples, # test_loader is None
-                              validation_size=validation_size,
-                              batch_size=batch_size,
-                              SEED= SEED,
-                              train_gene_ko=data_train_gene_ko,
-                              test_gene_ko=data_test_gene_ko,
-                              persistent_workers=False,
-                              covariates=None,
-                              num_workers= loader_workers,
+    train_loader, validation_loader, test_loader = create_loaders(
+        samples=samples, # test_loader is None
+        sim_regime=sim_regime,
+        validation_size=validation_size,
+        batch_size=batch_size,
+        SEED= SEED,
+        train_gene_ko=data_train_gene_ko,
+        test_gene_ko=data_test_gene_ko,
+        persistent_workers=False,
+        covariates=None,
+        num_workers= loader_workers,
 
     )
     model_n_genes = samples.shape[1]
@@ -201,14 +211,115 @@ if create_new_data:
     model_train_gene_ko = data_train_gene_ko
     model_test_gene_ko = data_test_gene_ko
     model_init_tensors = {}
+    if masking_loss:
+        values = beta.numpy()[beta>0]
+        grn_noise_var = np.std(values)
+        grn_noise_mean = np.mean(values)
+        grn_noise_p = get_sparsity(beta)*grn_noise_factor
+        salt = np.random.rand(*beta.shape) < grn_noise_p
+        bayes_prior = beta.clone().numpy()
+        bayes_prior[salt] = np.abs(np.random.normal(loc=grn_noise_mean, scale=grn_noise_var, size=np.sum(salt)))
+        if normalize_mask:
+            bayes_prior = bayes_prior/np.max(bayes_prior)
+        bayes_prior = torch.tensor(bayes_prior)
 
-else:
+elif data_source == "create_data_scMultiSim":
+    from scMultiSim import generate_data
+    # create synthetic data
+    ## parameters for data creation with prefix data
+    print("Setting data creation parameters...")
+    
+    data_cache_path = MODELS_PATH/"scMultiSim_cache"
+    data_intervention_type="Cas9"
+    data_generate_graph = True
+    
+    masking_parameters = {}
+    create_mask = False
+    if masking_mode != None:
+        create_mask = True
+        with open(parameters_path, "rb") as rf:
+            masking_parameters = pickle.load(rf)
+
+    print("Creating synthetic data...")
+    mask_precision, mask, samples, gt_interv, sim_regime, beta = generate_data(
+            n_genes = data_n_genes,
+            grn_params = {"sparsity":0.8},
+            n_samples_control = data_n_samples_control,
+            n_samples_per_pert = data_n_samples_per_perturbation,
+            train_gene_ko = data_train_gene_ko,
+            test_gene_ko = data_test_gene_ko,
+            pert_type = data_intervention_type,
+            pert_strength = 0,
+            cache_path = data_cache_path,
+            scMultiSim = scMultiSim_path,
+            create_mask = create_mask,
+            normalize=True,
+            pseudocounts = True,
+            mask_kwargs = masking_parameters,
+            generate_graph=data_generate_graph,
+            graph_kwargs=data_graph_kwargs,
+            verbose = data_verbose,
+            sem = data_sem
+    )
+    # save data for later validation
+    print(f"Saving data at {str(MODELS_PATH.joinpath('synthetic_data'))}...")
+    MODELS_PATH.joinpath("synthetic_data").mkdir(parents=True, exist_ok=True)
+    np.save(os.path.join(MODELS_PATH.joinpath("synthetic_data"), "check_sim_samples.npy"), samples)
+    np.save(os.path.join(MODELS_PATH.joinpath("synthetic_data"), "check_sim_regimes.npy"), sim_regime)
+    np.save(os.path.join(MODELS_PATH.joinpath("synthetic_data"), "check_sim_beta.npy"), beta)
+    np.save(os.path.join(MODELS_PATH.joinpath("synthetic_data"), "check_sim_gt_interv.npy"), gt_interv)
+
+    # initialize data loaders
+    print("Initializing Dataloaders...")
+    samples = torch.tensor(samples, dtype= float)
+    print(samples.shape)
+    gt_interv = torch.tensor(gt_interv, dtype= int)
+    print(gt_interv.shape)
+    sim_regime = torch.tensor(sim_regime, dtype= int)
+    print(sim_regime.shape)
+    beta = torch.tensor(beta, dtype= float)
+    print(beta.shape)
+
+    train_loader, validation_loader, test_loader = create_loaders(
+        samples=samples, # test_loader is None
+        sim_regime=sim_regime,
+        validation_size=validation_size,
+        batch_size=batch_size,
+        SEED= SEED,
+        train_gene_ko=data_train_gene_ko,
+        test_gene_ko=data_test_gene_ko,
+        persistent_workers=False,
+        covariates=None,
+        num_workers= loader_workers,
+
+    )
+    model_n_genes = data_n_genes
+    model_n_samples = samples.shape[0]
+    model_train_gene_ko = data_train_gene_ko
+    model_test_gene_ko = data_test_gene_ko
+    model_init_tensors = {}
+    if masking_loss:
+        values = beta.numpy()[beta>0]
+        grn_noise_var = np.std(values)
+        grn_noise_mean = np.mean(values)
+        grn_noise_p = get_sparsity(beta)*grn_noise_factor
+        salt = np.random.rand(*beta.shape) < grn_noise_p
+        bayes_prior = beta.clone().numpy()
+        bayes_prior[salt] = np.abs(np.random.normal(loc=grn_noise_mean, scale=grn_noise_var, size=np.sum(salt)))
+        if normalize_mask:
+            bayes_prior = bayes_prior/np.max(bayes_prior)
+        bayes_prior = torch.tensor(bayes_prior)
+
+elif data_source == "scMultiSim":
+    if evaluate:
+        raise NotImplementedError("Testing on scMultiSim data not implemented!")
     # get data from data_path
     # to define: samples (samples x genes), gt_interv (genes x contexts), sim_regime (intervened_variables = gt_interv[:, sim_regime].transpose(0, 1)), beta (n_genes x n_genes)
-    
+    raise DeprecationWarning("scMultiSim as data source is deprecated! Use 'create_data_scMultiSim instead!")
     # get gt_beta
     sms_path = DATA_PATH/"scMultiSim_data"/data_id
-    grn = pd.read_csv(sms_path/"unperturbed_data"/"geff.csv", index_col=0)
+    parameters_path = DATA_PATH/"parameters" / (parameter_set + ".pickle")
+    grn = pd.read_csv(sms_path/"unperturbed_data"/"geff.csv", index_col=0).T
     TFs = grn.columns.to_list()
     rna = sc.read_h5ad(sms_path/"ready_full_rna.h5ad")
     atac = sc.read_h5ad(sms_path/"ready_full_atac.h5ad")
@@ -236,17 +347,6 @@ else:
                 hard_mask[n] = np.zeros(possible_interactions.shape[0])
         # limit self interactions
         hard_mask*=np.diag(np.zeros(hard_mask.shape[0]))
-
-    if masking_loss:
-        grn_noise_var = np.std(beta)
-        grn_noise_mean = np.mean(beta)
-        grn_noise_p = get_sparsity(beta)*grn_noise_factor
-        salt = np.random.rand(*beta.shape) < grn_noise_p
-        bayes_prior = beta.copy()
-        bayes_prior[salt] = np.random.normal(loc=grn_noise_mean, scale=grn_noise_var, size=np.sum(salt))
-        if normalize_mask:
-            bayes_prior = bayes_prior/np.max(bayes_prior)
-        bayes_prior = torch.Tensor(bayes_prior)
 
     # get dataloaders
     dataloaders, gt_interv, sim_regime, mask = format_data(
@@ -279,6 +379,104 @@ else:
     else:
         model_init_tensors = {}
 
+    if masking_loss:
+        values = grn.to_numpy()[grn>0]
+        grn_noise_var = np.std(values)
+        grn_noise_mean = np.mean(values)
+        grn_noise_p = get_sparsity(beta)*grn_noise_factor
+        salt = np.random.rand(*beta.shape) < grn_noise_p
+        bayes_prior = beta.copy()
+        bayes_prior[salt] = np.abs(np.random.normal(loc=grn_noise_mean, scale=grn_noise_var, size=np.sum(salt)))
+        if normalize_mask:
+            bayes_prior = bayes_prior/np.max(bayes_prior)
+        bayes_prior = torch.tensor(bayes_prior)
+
+elif data_source == "create_data_from_grn":
+    # create synthetic data
+    ## parameters for data creation with prefix data
+    print("Setting data creation parameters...")
+    
+    grn_path = DATA_PATH/"bicycle_data"/data_id
+    for p in grn_path.iterdir():
+        if p.name.endswith("GRN.csv"):
+            grn_path /= p.name
+    beta = pd.read_csv(grn_path, index_col=0).to_numpy()
+    data_n_genes=beta.shape[0]
+    data_n_samples_control = 500
+    data_n_samples_per_perturbation = 250
+    data_train_gene_ko=[str(s) for s in range(data_n_genes)]
+    data_test_gene_ko = []
+    while len(data_test_gene_ko)<= data_n_genes*2:
+        data_test_gene_ko.append(tuple(np.random.choice(data_n_genes, size=2, replace=False).astype(str)))
+        data_test_gene_ko=list(set(data_test_gene_ko))
+    data_test_gene_ko = [f"{x[0]},{x[1]}" for x in data_test_gene_ko]
+    data_make_counts=True
+    data_verbose=True
+    data_intervention_type="Cas9"
+    data_T=1.0
+    data_library_size_range=[10 * data_n_genes, 100 * data_n_genes]
+    
+
+    print("Creating synthetic data...")
+    gt_dyn, intervened_variables, samples, gt_interv, sim_regime, beta=create_data_from_grn(
+        beta=beta,
+        n_samples_control=data_n_samples_control,
+        n_samples_per_perturbation=data_n_samples_per_perturbation,
+        train_gene_ko=data_train_gene_ko,
+        test_gene_ko=data_test_gene_ko,
+        verbose=data_verbose,
+        device=data_device,
+        T=data_T,
+        sem=data_sem,
+        intervention_type=data_intervention_type,
+        make_counts=data_make_counts,
+        library_size_range=data_library_size_range,
+        graph_kwargs=data_graph_kwargs,
+        )
+
+    # save data for later validation
+    print(f"Saving data at {str(MODELS_PATH.joinpath('synthetic_data'))}...")
+    MODELS_PATH.joinpath("synthetic_data").mkdir(parents=True, exist_ok=True)
+    np.save(os.path.join(MODELS_PATH.joinpath("synthetic_data"), "check_sim_samples.npy"), samples)
+    np.save(os.path.join(MODELS_PATH.joinpath("synthetic_data"), "check_sim_regimes.npy"), sim_regime)
+    np.save(os.path.join(MODELS_PATH.joinpath("synthetic_data"), "check_sim_beta.npy"), beta)
+    np.save(os.path.join(MODELS_PATH.joinpath("synthetic_data"), "check_sim_gt_interv.npy"), gt_interv)
+    
+
+    # initialize data loaders
+    print("Initializing Dataloaders...")
+    
+    train_loader, validation_loader, test_loader = create_loaders(
+        samples=samples, # test_loader is None
+        sim_regime=sim_regime,
+        validation_size=validation_size,
+        batch_size=batch_size,
+        SEED= SEED,
+        train_gene_ko=data_train_gene_ko,
+        test_gene_ko=data_test_gene_ko,
+        persistent_workers=False,
+        covariates=None,
+        num_workers= loader_workers,
+    )
+    model_n_genes = samples.shape[1]
+    model_n_samples = samples.shape[0]
+    model_train_gene_ko = data_train_gene_ko
+    model_test_gene_ko = data_test_gene_ko
+    model_init_tensors = {}
+    if masking_loss:
+        values = beta.numpy()[beta>0]
+        grn_noise_var = np.std(values)
+        grn_noise_mean = np.mean(values)
+        grn_noise_p = get_sparsity(beta)*grn_noise_factor
+        salt = np.random.rand(*beta.shape) < grn_noise_p
+        bayes_prior = beta.clone()
+        bayes_prior[salt] = np.abs(np.random.normal(loc=grn_noise_mean, scale=grn_noise_var, size=np.sum(salt)))
+        if normalize_mask:
+            bayes_prior = bayes_prior/np.max(bayes_prior)
+        bayes_prior = torch.tensor(bayes_prior)
+
+else:
+    raise ValueError(f"Invalid data_source: {data_source}. Choose one of ['create_data','create_data_from_grn','scMultiSim']!")
 
 # initialize parameters for the bicycle class with prefix model
 print("Initializing model parameters...")
@@ -310,7 +508,6 @@ elif masking_loss:
 model_use_encoder = False
 model_gt_beta = beta
 
-model_use_latents = True    # determines if z_kl loss is calculated during training
 model_covariates = None
 model_n_factors = 0
 model_intervention_type = "Cas9"
@@ -320,9 +517,6 @@ model_learn_T = False
 model_train_only_likelihood = False
 model_train_only_latents = False
 model_mask_genes = []
-
-# create mask from atac data
-
 
 print("Initializing BICYCLE model...")
 if trad_loading:
@@ -381,7 +575,7 @@ else:
         optimizer = model_optimizer,
         optimizer_kwargs = model_optimizer_kwargs,
         device = model_device,
-        loss_scale = torch.Tensor([model_scale_l1, model_scale_spectral, model_scale_lyapunov, model_scale_kl]),
+        loss_scale = torch.tensor([model_scale_l1, model_scale_spectral, model_scale_lyapunov, model_scale_kl]),
         early_stopping = model_early_stopping,
         early_stopping_min_delta = model_early_stopping_min_delta,
         early_stopping_patience = model_early_stopping_patience,
@@ -556,6 +750,18 @@ end_time = time.time()
 training_time = float(end_time - start_time)
 print(f"Training took {training_time} seconds.")
 
+pd.DataFrame(globals().items()).to_csv(MODELS_PATH/"globals.csv")
+
+if evaluate:
+    model.to(data_device)
+    if masking_loss:
+        nll, max_f1, average_precision, auroc, prior_average_precision, prior_auc =  model.evaluate(test_loader.dataset)
+        print(f"nll:{nll}, max_f1:{max_f1}, average_precision:{average_precision}, auroc:{auroc}, prior_average_precision:{prior_average_precision}, prior_auc:{prior_auc}")
+    else:
+        nll, max_f1, average_precision, auroc =  model.evaluate(test_loader.dataset)
+        print(f"nll: {nll}, max_f1: {max_f1}, average_precision: {average_precision}, auroc: {auroc}")
+
+
 
 # log the environment
-pd.DataFrame(globals().items()).to_csv(os.path.join(PLOTS_PATH, "globals.csv"))
+pd.DataFrame(globals().items()).to_csv(MODELS_PATH/"globals.csv")

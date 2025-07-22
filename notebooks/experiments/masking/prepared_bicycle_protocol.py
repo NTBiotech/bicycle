@@ -61,6 +61,7 @@ data_source = "create_data"
 
 #scMultiSim
 data_id = "data_run000"
+scMultiSim_path = DATA_PATH.parent/"scMS.R"
 # erdos renyi
 data_sem="linear"
 
@@ -84,7 +85,8 @@ else:
     from model import BICYCLE
 masking_loss = masking_mode == "loss"
 use_hard_mask = masking_mode == "hard"
-
+if use_hard_mask:
+    raise DeprecationWarning("Use a of hard masks is deprecated!")
 pl.seed_everything(SEED)
 torch.set_float32_matmul_precision(matmul_precision)
 
@@ -93,61 +95,61 @@ torch.set_float32_matmul_precision(matmul_precision)
 ## subdirectories model and plots
 ## in subdirectory data of the current path
 print("Setting output paths...")
+parameters_path = DATA_PATH/"parameters" / (parameter_set + ".pickle")
 
 OUT_PATH = DATA_PATH/"model_runs"
 MODELS_PATH = OUT_PATH/"models"
-PLOTS_PATH = OUT_PATH/"plots"
-
 print("Creating output directories...")
-for directory in [MODELS_PATH, PLOTS_PATH]:
-    if not directory.exists():
-        directory.mkdir(parents=True, exist_ok=True)
-
+if not MODELS_PATH.exists():
+    MODELS_PATH.mkdir(parents=True, exist_ok=True)
 # assign id to run
 run_id = str(Path(__file__).parent.name)
-
-for directory in [MODELS_PATH, PLOTS_PATH]:
-    if not directory.joinpath(run_id).exists():
-        directory.joinpath(run_id).mkdir(parents=True, exist_ok=True)
-
+if not MODELS_PATH.joinpath(run_id).exists():
+    MODELS_PATH.joinpath(run_id).mkdir(parents=True, exist_ok=True)
 MODELS_PATH = OUT_PATH.joinpath("models", run_id)
-PLOTS_PATH = OUT_PATH.joinpath("plots", run_id)
-print(f"Output paths are: {str(MODELS_PATH)} and {str(PLOTS_PATH)}!")
+print(f"Output path is: {str(MODELS_PATH)}!")
 
 if not trad_loading:
     validation_size=0
 data_device=torch.device("cpu")
 
+# needs to be a round number
+data_n_genes = 10 
+data_n_samples_control = 500
+data_n_samples_per_perturbation = 250
+
+data_train_gene_ko=[str(s) for s in range(data_n_genes)]
+data_test_gene_ko = []
+while len(data_test_gene_ko)< data_n_genes*2:
+    data_test_gene_ko.append(tuple(np.random.choice(data_n_genes, size=2, replace=False).astype(str)))
+    data_test_gene_ko=list(set(data_test_gene_ko))
+data_test_gene_ko = [f"{x[0]},{x[1]}" for x in data_test_gene_ko]
+data_intervention_type="Cas9"
+data_graph_kwargs = {
+    "abs_weight_low": 0.25,
+    "abs_weight_high": 0.95,
+    "p_success": 0.5,
+    "expected_density": 2,
+    "noise_scale": 0.5,
+    "intervention_scale": 0.1,
+}
+data_verbose=True
+
+
 if data_source == "create_data":
     # create synthetic data
     ## parameters for data creation with prefix data
     print("Setting data creation parameters...")
-    data_n_genes = 10 # needs to be a round number
-    data_n_samples_control = 500
-    data_n_samples_per_perturbation = 250
+    
     data_make_counts=True
-    data_train_gene_ko=list(np.arange(0, data_n_genes, 1).astype(str))
-    data_test_gene_ko = []
-    while len(data_test_gene_ko)< data_n_genes*2:
-        data_test_gene_ko.append(tuple(np.random.choice(data_n_genes, size=2, replace=False).astype(str)))
-        data_test_gene_ko=list(set(data_test_gene_ko))
-    data_test_gene_ko = [f"{x[0]},{x[1]}" for x in data_test_gene_ko]
-
+    
     data_graph_type="erdos-renyi"
     data_edge_assignment="random-uniform"
-    data_make_contractive=True
-    data_verbose=True
-    data_intervention_type="Cas9"
+    data_make_contractive=True    
     data_T=1.0
     data_library_size_range=[10 * data_n_genes, 100 * data_n_genes]
-    data_graph_kwargs = {
-        "abs_weight_low": 0.25,
-        "abs_weight_high": 0.95,
-        "p_success": 0.5,
-        "expected_density": 2,
-        "noise_scale": 0.5,
-        "intervention_scale": 0.1,
-    }
+    
+
     print("Creating synthetic data...")
     gt_dyn, intervened_variables, samples, gt_interv, sim_regime, beta = create_data(
         n_genes = data_n_genes,
@@ -208,8 +210,84 @@ if data_source == "create_data":
             bayes_prior = bayes_prior/np.max(bayes_prior)
         bayes_prior = torch.tensor(bayes_prior)
 elif data_source == "create_data_scMultiSim":
+    from scMultiSim import generate_data
+    # create synthetic data
+    ## parameters for data creation with prefix data
+    print("Setting data creation parameters...")
     
-    pass
+    data_cache_path = MODELS_PATH/"scMultiSim_cache"
+    data_intervention_type="Cas9"
+    data_generate_graph = True
+    
+    masking_parameters = {}
+    create_mask = False
+    if masking_mode != None:
+        create_mask = True
+        with open(parameters_path, "rb") as rf:
+            masking_parameters = pickle.load(rf)
+
+    print("Creating synthetic data...")
+    mask_precision, mask, samples, gt_interv, sim_regime, beta = generate_data(
+            n_genes = data_n_genes,
+            grn_params = {"sparsity":0.8},
+            n_samples_control = data_n_samples_control,
+            n_samples_per_pert = data_n_samples_per_perturbation,
+            train_gene_ko = data_train_gene_ko,
+            test_gene_ko = data_test_gene_ko,
+            pert_type = data_intervention_type,
+            pert_strength = 0,
+            cache_path = data_cache_path,
+            scMultiSim = scMultiSim_path,
+            create_mask = create_mask,
+            normalize=True,
+            pseudocounts = True,
+            mask_kwargs = masking_parameters,
+            generate_graph=data_generate_graph,
+            graph_kwargs=data_graph_kwargs,
+            verbose = data_verbose,
+            sem = data_sem
+    )
+    # save data for later validation
+    print(f"Saving data at {str(MODELS_PATH.joinpath('synthetic_data'))}...")
+    MODELS_PATH.joinpath("synthetic_data").mkdir(parents=True, exist_ok=True)
+    np.save(os.path.join(MODELS_PATH.joinpath("synthetic_data"), "check_sim_samples.npy"), samples)
+    np.save(os.path.join(MODELS_PATH.joinpath("synthetic_data"), "check_sim_regimes.npy"), sim_regime)
+    np.save(os.path.join(MODELS_PATH.joinpath("synthetic_data"), "check_sim_beta.npy"), beta)
+    np.save(os.path.join(MODELS_PATH.joinpath("synthetic_data"), "check_sim_gt_interv.npy"), gt_interv)
+
+    # initialize data loaders
+    print("Initializing Dataloaders...")
+    
+    train_loader, validation_loader, test_loader = create_loaders(
+        samples=samples, # test_loader is None
+        sim_regime=sim_regime,
+        validation_size=validation_size,
+        batch_size=batch_size,
+        SEED= SEED,
+        train_gene_ko=data_train_gene_ko,
+        test_gene_ko=data_test_gene_ko,
+        persistent_workers=False,
+        covariates=None,
+        num_workers= loader_workers,
+
+    )
+    model_n_genes = samples.shape[1]
+    model_n_samples = samples.shape[0]
+    model_train_gene_ko = data_train_gene_ko
+    model_test_gene_ko = data_test_gene_ko
+    model_init_tensors = {}
+    if masking_loss:
+        values = beta.numpy()[beta>0]
+        grn_noise_var = np.std(values)
+        grn_noise_mean = np.mean(values)
+        grn_noise_p = get_sparsity(beta)*grn_noise_factor
+        salt = np.random.rand(*beta.shape) < grn_noise_p
+        bayes_prior = beta.clone().numpy()
+        bayes_prior[salt] = np.abs(np.random.normal(loc=grn_noise_mean, scale=grn_noise_var, size=np.sum(salt)))
+        if normalize_mask:
+            bayes_prior = bayes_prior/np.max(bayes_prior)
+        bayes_prior = torch.tensor(bayes_prior)
+
 elif data_source == "scMultiSim":
     if evaluate:
         raise NotImplementedError("Testing on scMultiSim data not implemented!")
@@ -304,7 +382,7 @@ elif data_source == "create_data_from_grn":
     data_n_genes=beta.shape[0]
     data_n_samples_control = 500
     data_n_samples_per_perturbation = 250
-    data_train_gene_ko=list(np.arange(0, data_n_genes, 1).astype(str))
+    data_train_gene_ko=[str(s) for s in range(data_n_genes)]
     data_test_gene_ko = []
     while len(data_test_gene_ko)<= data_n_genes*2:
         data_test_gene_ko.append(tuple(np.random.choice(data_n_genes, size=2, replace=False).astype(str)))
@@ -315,14 +393,7 @@ elif data_source == "create_data_from_grn":
     data_intervention_type="Cas9"
     data_T=1.0
     data_library_size_range=[10 * data_n_genes, 100 * data_n_genes]
-    data_graph_kwargs = {
-        "abs_weight_low": 0.25,
-        "abs_weight_high": 0.95,
-        "p_success": 0.5,
-        "expected_density": 2,
-        "noise_scale": 0.5,
-        "intervention_scale": 0.1,
-    }
+    
 
     print("Creating synthetic data...")
     gt_dyn, intervened_variables, samples, gt_interv, sim_regime, beta=create_data_from_grn(
@@ -657,7 +728,7 @@ end_time = time.time()
 training_time = float(end_time - start_time)
 print(f"Training took {training_time} seconds.")
 
-pd.DataFrame(globals().items()).to_csv(PLOTS_PATH/"globals.csv")
+pd.DataFrame(globals().items()).to_csv(MODELS_PATH/"globals.csv")
 
 if evaluate:
     model.to(data_device)
@@ -671,4 +742,4 @@ if evaluate:
 
 
 # log the environment
-pd.DataFrame(globals().items()).to_csv(PLOTS_PATH/"globals.csv")
+pd.DataFrame(globals().items()).to_csv(MODELS_PATH/"globals.csv")

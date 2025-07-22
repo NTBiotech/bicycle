@@ -27,6 +27,17 @@ def normalize_data(data:np.ndarray, cpm = True, scale = True):
     if convert:
         data = pd.DataFrame(data, columns=columns, index=index)
     return data
+def normalize_tensor(data:torch.Tensor, cpm = True, scale = True):
+    """Function for cpm normalization and scaling and centering of genes."""
+    print("Normalizing data")
+    # normalize data
+    if cpm:
+        data = torch.log1p((data/ torch.sum(data, dim=1, keepdims=True))*1e6)
+    if scale:
+        # scale and center data (per gene)
+        data = (data - torch.mean(data, dim=0))/torch.std(data, dim=0)
+        data[torch.isnan(data)] = 0
+    return data
 
 def above_threshold(matrix:np.array, percentile : int = 50, threshold : int = None):
     if threshold is None:

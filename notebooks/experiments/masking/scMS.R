@@ -34,7 +34,7 @@ cif_sigma <- 1
 diff_cif_fraction <- 0.8
 intrinsic_noise <- 0.5
 atac_effect <- 0.8
-#region_distrib <- c(0.1, 0.5, 0.4)
+# region_distrib <- c(0.1, 0.5, 0.4)
 # Noise and Batch effect
 noise_alpha_mean <- 1e4
 n_batches <- 2
@@ -192,7 +192,7 @@ options <- list(
   num.genes = n_genes+1,
   mod.cif.giv = if (intervention) mod_cif_giv else NULL,
   atac.effect = atac_effect
-  #region.distrib = region_distrib
+  # region.distrib = region_distrib
 )
 
 results <- sim_true_counts(options)

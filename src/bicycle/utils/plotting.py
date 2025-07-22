@@ -292,8 +292,8 @@ def plot_comparison(grn1:np.ndarray, grn2=None, dist:dict=None):
     if not dist is None:
         pdf1 = norm.pdf(x, dist["loc1"], dist["std1"])
         pdf2 = norm.pdf(x, dist["loc2"], dist["std2"])
-        plt.plot(x, pdf1/2, label=f"pdf1 with\nloc:{dist["loc1"]}\nstd:{dist["std1"]}", color = "orange", linewidth = 2)
-        plt.plot(x, pdf2/2, label=f"pdf2 with\nloc:{dist["loc2"]}\nstd:{dist["std2"]}", color = "blue", linewidth = 2)
+        plt.plot(x, pdf1/2, label=f"pdf1 with\nloc:{dist['loc1']}\nstd:{dist['std1']}", color = "orange", linewidth = 2)
+        plt.plot(x, pdf2/2, label=f"pdf2 with\nloc:{dist['loc2']}\nstd:{dist['std2']}", color = "blue", linewidth = 2)
     plt.ylabel("Density")
     plt.xlabel("Interaction capacity")
     plt.legend()
