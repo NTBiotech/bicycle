@@ -51,14 +51,18 @@ from datetime import timedelta
 
 
 DATA_PATH = Path("/data/toulouse/bicycle/notebooks/experiments/masking/data")
-
+GPU_DEVICES = [0]
+print(str(GPU_DEVICES)[1:-1])
+os.environ["CUDA_VISIBLE_DEVICES"] = str(GPU_DEVICES)[1:-1]
+print(f"RUNNING ON CUDA: {GPU_DEVICES}")
 SEED = 1
 GPU_DEVICES = [0]
+
 
 early_stopping = False
 
 # masking
-masking_mode = "loss"
+masking_mode = None
 bin_prior = False
 scale_mask = 1
 parameter_set = "params5"
@@ -507,7 +511,7 @@ model_mask_genes = []
 # training variables
 swa = 100                                         # hyperparameter
 # how often to caculate nll for validation
-check_val_every_n_epoch = 1
+check_val_every_n_epoch = 100
 log_every_n_steps = 100
 
 def train_bicycle(config):
@@ -703,9 +707,11 @@ def train_bicycle(config):
         "final_nll":nll.cpu().numpy(),
         "final_max_f1":max_f1.cpu().numpy(),
         "final_average_precision":average_precision.cpu().numpy(),
-        "final_auroc":auroc.cpu().numpy()}
+        "final_auroc":auroc.cpu().numpy(),
+        "prior_average_precision": prior_average_precision.cpu().numpy(), 
+        "prior_auroc": prior_auroc.cpu().numpy(),
+        }
         )
-    print(empty_report)
     tune.report(empty_report)
     del nll, max_f1, average_precision, auroc, prior_average_precision, prior_auroc
     del trainer, model, train_loader, validation_loader, test_loader
@@ -713,13 +719,12 @@ def train_bicycle(config):
     gc.collect()
 
 ray.init()
-
 os.environ["TUNE_DISABLE_STRICT_METRIC_CHECKING"] = "1"
 #os.environ["RAY_memory_monitor_refresh_ms"] = "0"
 os.environ["RAY_memory_usage_threshold"] = str(0.99)
 
 
-metric = "nll"
+metric = "average_precision"
 time_budget = timedelta(hours=10)
 tuner_path = MODELS_PATH/"tune_results"
 tuner_path.mkdir()
@@ -749,22 +754,18 @@ def trial_name_creator(trial):
     return f"{trial.trainable_name}_{trial.trial_id}"
 
 tune_config=tune.TuneConfig(
-    #num_samples=100,
+    num_samples=100,
     scheduler=ASHAScheduler(grace_period=10, stop_last_trials=False),
     search_alg=bayes_opt_search,
-    max_concurrent_trials=2,
+    max_concurrent_trials=4,
     metric=metric,
     mode = "min", 
     reuse_actors=False,
     trial_dirname_creator= trial_name_creator,
-    time_budget_s=time_budget
+    #time_budget_s=time_budget
 )
 
-train_with_recources = tune.with_resources(train_bicycle, resources = {"cpu":n_workers, "gpu":1})
-
-def trainable(config):
-    wait_for_gpu()
-    return train_with_recources(config)
+train_with_recources = tune.with_resources(train_bicycle, resources = {"gpu":len(GPU_DEVICES)/tune_config.max_concurrent_trials})
 
 tuner = tune.Tuner(
     trainable=train_with_recources,
@@ -777,11 +778,19 @@ results = tuner.fit()
 
 results.get_dataframe(filter_metric=metric).to_csv(MODELS_PATH/"results_df.csv")
 dfs = {result.path: result.metrics_dataframe for result in results}
+try:
+    for result in results:
+        result.metrics_dataframe.to_csv(result.path/"result.csv")
+except:
+    print("ERROR when saving result DataFrames")
 [d.nll.plot() for d in dfs.values() if metric in d.columns]
 # log the environment
-best_result = results.get_best_result(metric="final_" + metric, mode="min")
-print(best_result)
-best_result.metrics_dataframe.to_csv(MODELS_PATH/"best_metrics.csv")
+try:
+    best_result = results.get_best_result(metric="final_" + metric, mode="min")
+    print(best_result)
+    best_result.metrics_dataframe.to_csv(MODELS_PATH/"best_metrics.csv")
+except RuntimeError:
+    print("No best trial found!")
 pd.DataFrame(globals().items()).to_csv(MODELS_PATH/"globals.csv")
 
 ray.shutdown()

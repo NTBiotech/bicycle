@@ -54,6 +54,7 @@ trad_loading=True
 
 # masking
 masking_mode = None
+use_atac_mask = False
 bin_prior = False
 scale_mask = 1
 parameter_set = "params5"
@@ -149,6 +150,8 @@ data_graph_kwargs = {
 
 
 if data_source == "create_data":
+    if use_atac_mask:
+        print("atac_mask not supported if data_source='create_data'")
     # create synthetic data
     ## parameters for data creation with prefix data
     print("Setting data creation parameters...")
@@ -299,12 +302,15 @@ elif data_source == "create_data_scMultiSim":
     model_test_gene_ko = data_test_gene_ko
     model_init_tensors = {}
     if masking_loss:
-        values = beta.numpy()[beta>0]
+        template = beta.clone().numpy()
+        if use_atac_mask:
+            template = mask
+        values = template[template>0]
         grn_noise_var = np.std(values)
         grn_noise_mean = np.mean(values)
-        grn_noise_p = get_sparsity(beta)*grn_noise_factor
-        salt = np.random.rand(*beta.shape) < grn_noise_p
-        bayes_prior = beta.clone().numpy()
+        grn_noise_p = get_sparsity(template)*grn_noise_factor
+        salt = np.random.rand(*template.shape) < grn_noise_p
+        bayes_prior = template
         bayes_prior[salt] = np.abs(np.random.normal(loc=grn_noise_mean, scale=grn_noise_var, size=np.sum(salt)))
         if normalize_mask:
             bayes_prior = bayes_prior/np.max(bayes_prior)

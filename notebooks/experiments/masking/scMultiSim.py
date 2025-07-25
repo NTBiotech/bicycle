@@ -10,7 +10,7 @@ from scipy.special import expit
 from bicycle.utils.data import generate_weighted_graph, generate_grn
 from bicycle.utils.general import get_id
 from bicycle.utils.plotting import plot_comparison
-from bicycle.utils.mask_utils import get_mask2, normalize_data
+from bicycle.utils.mask_utils import get_mask2, normalize_data, add_saltpepper
 from sklearn.metrics import average_precision_score
 import torch
 import json
@@ -37,6 +37,7 @@ def generate_data(
         graph_kwargs = {},
         verbose = False,
         sem = "pert_grn",
+        noise_p=None,
         mask_kwargs = {},
 ):
     """Function to generate perturbed scRNA data using scMultiSim."""
@@ -170,7 +171,7 @@ def generate_data(
 
     if n_samples >0:
         # generate unperturbed data
-        format_for_scMultiSim(beta, cache_path, pseudocounts)
+        format_for_scMultiSim(beta.T, cache_path, pseudocounts)
         print(os.system(
             f"Rscript {scMultiSim.name} --n_genes {n_genes} --cache {cache_path.as_posix()} --n_samples {n_samples} --noise {add_noise} --batch {add_batch} --intervention {str(intervention).upper()}")
             )
@@ -191,7 +192,7 @@ def generate_data(
     
     else:
         # generate geff and region matrices
-        format_for_scMultiSim(beta, cache_path, pseudocounts)
+        format_for_scMultiSim(beta.T, cache_path, pseudocounts)
         print(os.system(
             f"Rscript {scMultiSim.name} --n_genes {n_genes} --cache {cache_path.as_posix()} --n_samples {1} --noise {add_noise} --batch {add_batch} --intervention FALSE")
             )
@@ -208,7 +209,7 @@ def generate_data(
             if pert_type == "Cas9":
                 pert_grn[context, :] *= pert_strength
 
-            format_for_scMultiSim(pert_grn, cache_path, pseudocounts)
+            format_for_scMultiSim(pert_grn.T, cache_path, pseudocounts)
             print(os.system(
                 f"Rscript {scMultiSim.name} --n_genes {n_genes} --cache {cache_path.as_posix()} --n_samples {n_samples_per_pert} --noise {add_noise} --batch {add_batch} --intervention FALSE")
                 )
@@ -248,6 +249,9 @@ def generate_data(
         if verbose:
             print("mask_kwargs: ",(mask_kwargs))
 
+        if noise_p!= None:
+            region_to_gene = add_saltpepper(region_to_gene, p=noise_p)
+            region_to_tf = add_saltpepper(region_to_tf, p=noise_p)
         mask = get_mask2(
             atac=full_atac[(sim_regime == 0)[:len(full_atac)]].T,
             region_to_gene = region_to_gene,
@@ -261,6 +265,7 @@ def generate_data(
 
         print("average precision vs geff: ",average_precision_score(y_true, mask_eval.flatten()))
 
+        mask = mask.T
         if mask.shape != beta.shape:
             for n, (m, b) in enumerate(zip(mask.shape, beta.shape)):
                 if m < b:
@@ -269,7 +274,7 @@ def generate_data(
                     mask = np.pad(mask, pad, mode = "minimum")
                     print("mask is smaller than grn! Consider using pseudocounts.")
                 if m > b:
-                    print("mask is bigger than grn! Check RNA and gt_interv trimming was correct.")
+                    print("mask is bigger than grn! Check if RNA and gt_interv trimming was correct.")
                     if n:
                         mask = mask[:,:b-m]
                     else:
@@ -295,10 +300,10 @@ def generate_data(
         mask_eval = expit((mask-np.mean(mask))/np.std(mask))
         precision = average_precision_score(y_true, mask_eval.flatten())
         print("average precision vs beta: ",precision)
-        mask = mask.T
-        beta = beta.T
+
     if full_rna.shape[1] != n_genes:
         full_rna = full_rna[:,:n_genes-full_rna.shape[1]]
+
     if verbose:
         def st_hist(ax, X, label=None, color=None, **kwargs):
             return ax.hist(X, label=label, 
