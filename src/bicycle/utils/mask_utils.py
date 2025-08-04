@@ -7,6 +7,7 @@ import anndata
 import torch
 from sklearn.model_selection import train_test_split
 from torch.utils.data import TensorDataset, DataLoader
+from sklearn.decomposition import PCA
 
 def normalize_data(data:np.ndarray, cpm = True, scale = True):
     """Function for cpm normalization and scaling and centering of genes."""
@@ -169,12 +170,20 @@ def get_mask2(
         corr_threshold = False,
         corr_threshold_percentile: int = 50,
         pseudocounts = False,
+        pca = False,
+        pcs = []
         ):
     """
     Args:
     atac (np.array): regions x samples
     params (dict): function parameters
     """
+    if pca:
+        pca = PCA(svd_solver="full").fit(atac)
+        atac=pca.transform(atac)
+        if len(pcs) >0:
+            atac[:,~np.array(pcs)] = 0
+        atac = pca.inverse_transform(atac)
     if pseudocounts:
         atac += np.min(atac)*0.0001
     if correlation:
