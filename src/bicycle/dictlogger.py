@@ -14,6 +14,10 @@ class _History(dict):
 
 
 class DictLogger(Logger):
+    """
+    Class for logging model hyperparameters and metrics. 
+    Subclasses the pytorch_lightning.loggers Logger class.
+    """
     def __init__(self, version=None):
         self._version = version
         self.experiment = None
@@ -30,7 +34,7 @@ class DictLogger(Logger):
 
     @rank_zero_only
     def log_hyperparams(self, params: Namespace):
-        self.hyperparams = vars(params)
+        self.hyperparams = params
 
     @rank_zero_only
     def log_metrics(self, metrics: dict[str, float], step: int):

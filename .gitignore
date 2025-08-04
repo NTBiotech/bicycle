@@ -161,3 +161,8 @@ cython_debug/
 
 **/*.ckpt
 **/*.png
+
+notebooks/experiments/bottleneck/data/*
+notebooks/experiments/masking/data/*
+notebooks/experiments/masking/presentation/*
+notebooks/experiments/bottleneck/sandbox.ipynb

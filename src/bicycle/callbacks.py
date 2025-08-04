@@ -10,6 +10,13 @@ from bicycle.utils.plotting import plot_training_results
 
 
 class MyLoggerCallback(pl.Callback):
+    """
+    Class to log after training of the bicycle model.
+
+    Automatically logs the trainer.logger.history in a "logger.parquet" file.
+    Also dumps training stats into "report.yaml" file.
+    This class subsets the pytorch Lightning Callback class.
+    """
     def __init__(self, dirpath: str, **kwargs) -> None:
         super().__init__(**kwargs)
         self.dirpath = dirpath
@@ -45,7 +52,7 @@ class MyLoggerCallback(pl.Callback):
 
 # Subclass _should_skip_saving_checkpoint
 class CustomModelCheckpoint(ModelCheckpoint):
-    """Custom ModelCheckpoint to save after n epochs."""
+    """Custom ModelCheckpoint to save after n epochs. Saves at the end of training."""
 
     def __init__(self, start_after: int = 1000, **kwargs):
         super().__init__(**kwargs)
@@ -65,7 +72,25 @@ class CustomModelCheckpoint(ModelCheckpoint):
 
 
 class GenerateCallback(pl.Callback):
+    """
+    Class for generating a callback at the end of each training epoch of the bicycle model.
+    Subclasses pytorch_lightnings Callback function.
+
+    Notes:
+    - Calls the plot_training_results function from bicycle.utils.plotting
+        after each epoch that's a multiple of `plot_epoch_callback`. 
+    """
     def __init__(self, file_name_plot, plot_epoch_callback=10, true_beta=None, labels=None):
+        """
+        Initializes the GenerateCallback function for plotting training results after each training epoch.
+
+        Args:
+            file_name_plot (str): containing the file_name for the saved plots.
+                Can be given with or without the suffix.
+            plot_epoch_callback (int): specifying the callback interval.
+            true_beta (Optional|torch.Tensor): containing the ground truth gene adjacency matrix.
+            labels (Iterable): contains the gene labels.
+        """
         super().__init__()
         self.plot_epoch_callback = plot_epoch_callback
         self.true_beta = true_beta

@@ -4,9 +4,13 @@ import numpy as np
 import seaborn as sns
 import torch
 from bicycle.utils.training import lyapunov_direct
+from bicycle.utils.plotting import plot_comparison
 from sklearn.model_selection import train_test_split
 from torch.utils.data import DataLoader
 from tqdm.auto import tqdm
+from scipy.stats.distributions import norm
+import json
+from pathlib import Path
 
 
 def create_data(
@@ -27,6 +31,13 @@ def create_data(
     library_size_range=[5000, 25000],
     **graph_kwargs,
 ):
+    """
+    Function to create a synthetic single cell RNA-seq dataset with perturbations.
+
+    Returns:
+        tuple: (gt_dyn, intervened_variables, samples, gt_interv, sim_regime, beta)
+
+    """
     N = n_genes
 
     # We start counting gene ids from 0, 1, ..., N-1
@@ -97,7 +108,7 @@ def create_data(
             print("*" * 100)
 
     # Print sparsity level of adjacency matrix
-    if verbose:
+    if False: #if verbose: DEPRECATED! gt_dyn accessed before initialization
         print(f"Sparsity level of adjacency matrix: {(100*(beta != 0).sum() / (N * N)):.2f}%")
 
         fig, ax = plt.subplots(1, 2, figsize=(15, 7.5))
@@ -341,6 +352,12 @@ def create_loaders(
     covariates=None,
     **kwargs,
 ):
+    """
+    Function to create dataloaders for training the bicycle model.
+
+    Returns:
+        tuple: (train_loader, validation_loader, test_loader, covariates)
+    """
     samples_interventions = sim_regime.long().to(torch.int64)
 
     if len(test_gene_ko) > 0:
@@ -555,6 +572,29 @@ def get_diagonal_mask(n_genes, device):
 
 
 def compute_inits(init_data, rank_w_cov_factor, n_contexts, normalized=False):
+    """
+    Computes initial tensors for the bicycle model.
+
+    Args:
+        init_data (Iterable): Contains samples, sim_regime, sample_idx, data_category.
+            Corresponds to pytorch's `DataLoader.dataset`.
+        rank_w_cov_factor (int): Minimum of [number of TFs, n_genes-1].
+        n_contexts (int): Number of contexts
+        normalized (bool): Whether `init_data` is normalized. 
+            If False, the function normalizes to counts per gene.
+
+    Returns:
+        dict: Dictionary with the following keys:
+            - "alpha": Alpha tensor.
+            - "w_cov_factor": Covariance factor tensor.
+            - "w_cov_diag": Covariance diagonal tensor.
+
+    Notes:
+        Computes only alpha and omega. For use as `init_tensors` in BICYCLE, 
+        adding a "beta" key is possible.
+    
+    """
+
     samples, sim_regime, sample_idx, data_category = init_data[:]
     print("Initializing parameters from data")
 
@@ -602,6 +642,12 @@ def compute_inits(init_data, rank_w_cov_factor, n_contexts, normalized=False):
 def generate_weighted_graph(
     graph_type, nodes, edge_assignment, make_contractive=True, raise_if_not_cycle=True, device="cpu", **kwargs
 ):
+    """
+    Generates a GRN-like weighted graph.
+    
+    Returns:
+        Adjacency matrix as torch.Tensor with dimensions (genes, genes)
+    """
     def scale(g, edge_weights, p_edge_weights):
         if edge_weights is not None:
             if isinstance(edge_weights, (float, int)):
@@ -758,7 +804,7 @@ def create_loaders_norman(
     covariates=None,
     **kwargs,
 ):
-
+    """Deprecated!"""
     if len(test_regimes) > 0:
         # No intervention must be in train and test sim regimes:
         if len([x for x in train_regimes if x in test_regimes]) > 0:
@@ -955,3 +1001,495 @@ def create_loaders_norman(
         return train_loader, validation_loader, test_loader, covariates_reordered
     else:
         return train_loader, validation_loader, test_loader
+
+
+def create_data_from_grn(
+    beta,
+    n_samples_control,
+    n_samples_per_perturbation,
+    train_gene_ko=None,
+    test_gene_ko=None,
+    verbose=False,
+    device="cpu",
+    T=1.0,
+    sem="linear",
+    intervention_type="dCas9",
+    make_counts=False,
+    library_size_range=[5000, 25000],
+    **graph_kwargs,
+):
+    """
+    Function to create a synthetic single cell RNA-seq dataset with perturbations, given a grn.
+
+    Returns:
+        tuple: (gt_dyn, intervened_variables, samples, gt_interv, sim_regime, beta)
+
+    """
+
+    #check if beta is quadratic
+    assert len(beta.shape) == 2
+    assert beta.shape[0] == beta.shape[1]
+    n_genes = beta.shape[0]
+
+    beta = torch.tensor(beta, device=device).float()
+    # Compute eigenvalues of beta
+    B = torch.eye(n_genes) - beta
+    eigvals_B = np.real(np.linalg.eigvals(B))
+    # Check if all eigvals are positive
+    if not np.all(eigvals_B > 0):
+        raise ValueError("Eigenvalues of B are not positive!")
+    
+    # We start counting gene ids from 0, 1, ..., N-1
+    # We start counting regimes/contexts from 0, 1, ...
+
+    if verbose:
+        print("Training/Validation Target Genes:")
+        print(train_gene_ko)
+
+        print("Test Target Genes:")
+        print(test_gene_ko)
+
+    # No intervention must be in train and test sim regimes:
+    if len([x for x in train_gene_ko if x in test_gene_ko]) > 0:
+        raise ValueError("train and test gene knock-outs must be disjoint")
+
+    sim_regime_ctrl = torch.zeros((n_samples_control,), device=device)
+    n_contexts_list = train_gene_ko + test_gene_ko
+    n_contexts_list_w_ctrl = [""] + n_contexts_list
+
+    sim_regime_pert = torch.arange(1, 1 + len(n_contexts_list), device=device).repeat_interleave(
+        n_samples_per_perturbation
+    )
+
+    # Shuffle all tensor elements randomly
+    sim_regime_pert = sim_regime_pert[torch.randperm(len(sim_regime_pert))]
+
+    sim_regime = torch.cat((sim_regime_ctrl, sim_regime_pert)).long()
+
+    # Genes x regimes matrices, which indexes which genes are intervened in
+    # which context
+    gt_interv = torch.zeros((n_genes, len(n_contexts_list) + 1), device=device)
+
+    # Gene i is intervened in regime i
+    for idx, p in enumerate(n_contexts_list_w_ctrl):
+        # Empy string represents control
+        if p == "":
+            continue
+        elif "," in p:
+            # Comma separated values represent multiple interventions
+            for pp in p.split(","):
+                gt_interv[int(pp), idx] = 1
+        else:
+            gt_interv[int(p), idx] = 1
+
+    intervened_variables = gt_interv[:, sim_regime].transpose(0, 1)
+
+    gt_dyn = (
+        ((1.0 - torch.eye(n_genes, device=device)) * beta - torch.eye(n_genes, device=device)).detach().cpu().numpy()
+    )
+    if verbose:
+        print(f"Sparsity level of adjacency matrix: {(100*(beta != 0).sum() / (n_genes * n_genes)):.2f}%")
+
+        fig, ax = plt.subplots(1, 2, figsize=(15, 7.5))
+        sns.heatmap(
+            gt_dyn,
+            annot=True,
+            center=0,
+            cmap="vlag",
+            square=True,
+            annot_kws={"fontsize": 7},
+            ax=ax[0],
+        )
+
+        adjacency_matrix = (beta != 0).detach().cpu().numpy().astype(int)
+        mylabels = {i: k for i, k in enumerate([f"{i}" for i in range(n_genes)])}
+        # Check if adjacency matrix contains cycles
+        if not nx.is_directed_acyclic_graph(nx.from_numpy_array(adjacency_matrix)):
+            print("Adjacency matrix contains cycles")
+        rows, cols = np.where(adjacency_matrix != 0)
+        edges = zip(rows.tolist(), cols.tolist())
+        G = nx.DiGraph(directed=True)
+        all_rows = range(0, adjacency_matrix.shape[0])
+        for n in all_rows:
+            G.add_node(n)
+        G.add_edges_from(edges)
+        nx.draw(
+            G,
+            node_size=250,
+            labels=mylabels,
+            with_labels=True,
+            ax=ax[1],
+            pos=nx.circular_layout(G),
+        )
+        plt.show()
+
+    if sem == "linear-ou":
+        gt_dyn = (
+            ((1.0 - torch.eye(n_genes, device=device)) * beta - torch.eye(n_genes, device=device)).detach().cpu().numpy()
+        )
+
+        # Knockdown-Interventions:
+        alpha_p = 0.1 * torch.ones(n_genes, device=device)
+        # prev: 1.0 * torch.ones(N, device=device)
+        alpha = 1.0 * torch.ones(
+            n_genes, device=device
+        )  # torch.distributions.Gamma(0.5, 1).sample((N,)).to(device)
+        sigma_p = 0.001 * torch.ones(n_genes, device=device)
+        # prev: sigma = 0.1 * torch.ones(N, device=device)
+        sigma = 0.1 * torch.ones(
+            n_genes, device=device
+        )  # 0.001 * torch.distributions.Gamma(0.5, 1).sample((N,)).to(device)
+        beta_p = torch.zeros((n_genes, n_genes), device=device)
+
+        iv_a = (1 - gt_interv).T
+
+        if intervention_type == "dCas9":
+
+            print("Simulating data of intervention type dCas9")
+
+            betas = iv_a[:, None, :] * beta + (1 - iv_a)[:, None, :] * beta_p
+            alphas = iv_a * alpha[None, :] + (1 - iv_a) * alpha_p[None, :]
+            sigmas = iv_a[:, None, :] * torch.diag(sigma) + (1 - iv_a)[:, None, :] * torch.diag(sigma_p)
+
+            print("Shapes dCas9:", betas.shape, alphas.shape, sigmas.shape)
+
+        elif intervention_type == "Cas9":
+
+            print("Simulating data of intervention type Cas9")
+
+            betas = iv_a[:, :, None] * beta + (1 - iv_a)[:, :, None] * beta_p
+            alphas = alpha[None, :].expand(iv_a.shape[0], alpha.shape[0])
+            sigmas = torch.diag(sigma)[None, :, :].expand(iv_a.shape[0], sigma.shape[0], sigma.shape[0])
+
+            print("Shapes Cas9:", betas.shape, alphas.shape, sigmas.shape)
+        else:
+            raise NotImplementedError("Currently only Cas9 and dCas9 are supported as intervention_type.")
+
+        B = torch.eye(n_genes, device=betas.device)[None, :, :] - (1.0 - torch.eye(n_genes, device=betas.device))[
+            None, :, :
+        ] * betas.transpose(1, 2)
+
+        omegas = lyapunov_direct(
+            B.double(),
+            torch.bmm(sigmas, sigmas.transpose(1, 2)).double(),
+        ).float()
+
+        # Broadcast arrays back to batch_shape
+        B_broadcasted = B[sim_regime]
+        alphas_broadcasted = alphas[sim_regime]
+        omegas_broadcasted = omegas[sim_regime]
+
+        # for k in range(omegas.shape[0]):
+        # print(np.linalg.cholesky(omegas[k]))
+        # print(sorted([np.round(x, 4) for x in np.linalg.eigvals(omegas[k])]))
+
+        x_bar = torch.bmm(torch.linalg.inv(B_broadcasted), alphas_broadcasted[:, :, None]).squeeze()
+
+        samples = (
+            torch.distributions.MultivariateNormal(x_bar, covariance_matrix=omegas_broadcasted)
+            .sample()
+            .detach()
+        )
+
+        if verbose:
+            fig, ax = plt.subplots(1, 1, figsize=(5, 3))
+            plt.scatter(
+                samples[:, 0][sim_regime == 0].cpu().numpy(),
+                samples[:, 1][sim_regime == 0].cpu().numpy(),
+                # c=[int(x) for x in sim_regime.cpu().numpy()],
+                s=2,
+            )
+            ax.grid(True)
+            plt.colorbar()
+            plt.show()
+
+            plot_indices = np.where(torch.abs(beta * (1 - torch.eye(n_genes))).cpu().numpy() > 0.5)
+
+            i_plot = plot_indices[0][0]
+            j_plot = plot_indices[1][0]
+
+            plt.figure()
+            plt.title("Weight: %f" % beta[i_plot, j_plot].item())
+            plt.scatter(
+                samples[:, i_plot].cpu().numpy(),
+                samples[:, j_plot].cpu().numpy(),
+                c=sim_regime.cpu().numpy(),
+            )
+            plt.xlabel("gene %d" % i_plot)
+            plt.ylabel("gene %d" % j_plot)
+            plt.colorbar()
+
+        if make_counts:
+            # ps = torch.nn.Softmax(dim=-1)(samples)
+            ps = torch.softmax(samples / T, dim=-1)
+
+            # Cell-specific library size
+            library_size = torch.randint(
+                low=library_size_range[0],
+                high=library_size_range[1],
+                size=(samples.shape[0], 1),
+            )
+
+            for i in tqdm(range(samples.shape[0])):
+                P = torch.distributions.multinomial.Multinomial(
+                    total_count=library_size[i].item(), probs=ps[i]
+                )
+                samples[i] = P.sample()
+
+        if verbose:
+            fig, ax = plt.subplots(1, 1, figsize=(5, 3))
+            if make_counts:
+                plt.scatter(
+                    samples[:, 0].cpu().numpy() / library_size.cpu().numpy().squeeze(),
+                    samples[:, 4].cpu().numpy() / library_size.cpu().numpy().squeeze(),
+                    c=[int(x) for x in sim_regime.cpu().numpy()],
+                    s=2,
+                )
+            else:
+                plt.scatter(
+                    samples[:, 0].cpu().numpy(),
+                    samples[:, 4].cpu().numpy(),
+                    c=[int(x) for x in sim_regime.cpu().numpy()],
+                    s=2,
+                )
+            ax.grid(True)
+            plt.colorbar()
+            plt.show()
+
+        return (gt_dyn, intervened_variables, samples, gt_interv, sim_regime, beta)
+
+    elif sem == "linear":
+        beta = np.array(beta)
+
+        def generate_data(n_samples, intervention_set=[None]):
+            noise_scale = graph_kwargs.get("noise_scale", 0.5)
+            intervention_scale = graph_kwargs.get("intervention_scale", 0.1)
+
+            # set intervention_set = [None] for purely observational data.
+            a = noise_scale * np.random.randn(n_genes, n_samples)
+
+            observed_set = np.setdiff1d(np.arange(n_genes), intervention_set)
+            non_intervened = np.zeros((n_genes, n_genes))
+            non_intervened[observed_set, observed_set] = 1
+
+            a_pert = np.zeros((n_genes, n_samples))
+            if intervention_set[0] is not None:
+                # Knock-Down
+                a_pert[intervention_set, :] = intervention_scale * np.random.randn(
+                    len(intervention_set), n_samples
+                )
+
+            # z_bar = B^-1 @ alpha
+            I = np.eye(n_genes)
+            z_bar = np.linalg.inv(I - non_intervened @ beta.T) @ (non_intervened @ a + a_pert)
+
+            # check: Compute eigenvalues for non_intervened@beta.T and assert if their abs is > 1
+            eigvals = np.linalg.eigvals(non_intervened @ beta)
+            if not np.all(np.abs(eigvals) <= 1):
+                raise ValueError("Eigenvalues of U @ beta must be <= 1")
+
+            return z_bar.T
+
+        samples = []
+        int_contexts = []
+        for context in np.unique(sim_regime):
+            # Convert context i to intervention set
+            i = np.array(torch.where(gt_interv[:, context] == 1)[0])
+            # # Subtract 1 from all elements in i
+            # i = i - 1
+            if len(i) == 0:
+                X = generate_data(n_samples=torch.sum(sim_regime == context), intervention_set=[None])
+            else:
+                X = generate_data(n_samples=torch.sum(sim_regime == context), intervention_set=i)
+            samples.append(X)
+
+            int_contexts.append(np.ones(len(X)) * context)
+
+        samples = np.concatenate(samples, axis=0)
+        int_contexts = np.concatenate(int_contexts, axis=0)
+        intervened_variables = gt_interv[:, int_contexts].transpose(0, 1)
+        # Convert to tensor
+        samples = torch.tensor(samples, device=device).float()
+        int_contexts = torch.tensor(int_contexts, device=device).long()
+        beta = torch.tensor(beta, device=device).float()
+
+
+        return (gt_dyn, intervened_variables, samples, gt_interv, int_contexts, beta)
+    else:
+        raise ValueError(f"SEM {sem} not implemented. Choose one of ['linear', 'linear-ou'].")
+
+def generate_grn(
+        n_genes = 10,
+        grn_shape = (0,0),
+        grn_params = {},
+        fit_to_standard = False,
+        standard_grn_path = None,
+        distribute_TFs = True,
+        out_path = Path("../"),
+        verbose = False,
+        eigenvalues = True,
+        clip_standard = None,
+        sample_connections =False
+        ):
+    """
+    Function to sample a grn from a bimodal normal distribution.
+
+    Args.:
+        n_genes
+        grn_params (dict): dict with loc1, std1, loc2, std2, sparsity.
+        fit_to_standard (bool): Wether to simulate based on a prior grn.
+            In this case, the other parameters are derived from the standard grn.
+        standard_grn_path (str or Path): Path to a csv containing the standard grn.
+        distribute_TFs (bool): Determines if TFs will be the first n_TFs genes
+            or distributed randomly.
+        verbose (bool)
+        eigenvalues (bool): If True the eigenvalues of the grn will be positive.
+        clip_standard (int): If not None, the last clip_standard genes
+            of the standard will be clipped before processing.
+        sample_connections (bool): Wether to sample from connectivity_distribution.
+    Returns:
+        new_grn (np.ndarray)
+        generation_kwargs (dict)
+    """
+    def fit_to_grn(grn:np.ndarray):
+        """Function to fit a bimodal Normal distribution to grn values."""
+        values = grn.flatten()
+        values = np.sort(values[values!=0])
+        values1= values[:len(values)//2]
+        values2= values[len(values)//2:]
+    
+        loc1, std1 = norm.fit(values1)
+        loc2, std2= norm.fit(values2)
+    
+        return loc1, std1, loc2, std2
+
+    if grn_shape == (0,0):
+        grn_shape = (n_genes, n_genes)
+        
+    if verbose:
+        if not out_path.exists():
+            out_path.mkdir(parents=True, exist_ok=True)
+
+
+    TF_names = np.arange(1, grn_shape[1]+1).astype(str)
+    gene_names = np.arange(1, grn_shape[0]+1).astype(str)
+    if distribute_TFs:
+        TF_names = np.random.choice(np.arange(1, grn_shape[0]+1), size=grn_shape[1], replace=False).astype(str)
+        gene_names = np.arange(1, grn_shape[0]+1).astype(str)
+    if verbose:
+        print(f"TFs are {TF_names.tolist()}")
+
+    ## First we create sample a grn form a bimodal normal distribution
+    # To get the parameters we can either use an input or we can model of of the standard_grn
+    if fit_to_standard:
+        standard_grn = np.loadtxt(standard_grn_path, skiprows=1, delimiter=",", usecols=np.arange(1, n_genes+1))
+        if clip_standard!=None:
+            standard_grn=standard_grn[:-clip_standard]
+        print("Using supplied standard grn")
+        loc1, std1, loc2, std2 = fit_to_grn(standard_grn)
+        grn_sparsity = np.sum(standard_grn==0).sum()/np.prod(standard_grn.shape)
+        sparsity = grn_sparsity
+        print(f"Gt sparsity: {grn_sparsity}")
+        
+
+    else:
+        print("Using supplied parameters")
+        loc1 = grn_params.get("loc1", 2)
+        std1 = grn_params.get("std1", 0.4)
+        loc2 = grn_params.get("loc2", 3.8)
+        std2 = grn_params.get("std2", 0.6)
+        sparsity = grn_params.get("sparsity", 0.8)
+        standard_grn = None
+
+    if fit_to_standard and sample_connections:
+            # also fit connectivity distribution (TFs per gene)
+            con = np.sum(standard_grn>0, axis=1)/standard_grn.shape[1]
+            val, counts = np.unique(con, return_counts=True)
+            counts = counts / np.sum(counts)
+    
+    success = False
+    while not success:
+        if fit_to_standard and sample_connections:
+            connectivities = np.random.choice(val, size=grn_shape[0], replace=True, p=counts)
+            connectivities *= grn_shape[1]
+            connectivities = np.round(connectivities).astype(int)
+        
+            form = np.zeros(grn_shape)
+            for n, con in enumerate(connectivities):
+                row = np.append(np.ones(con), np.zeros(grn_shape[1]-con))
+                np.random.shuffle(row)
+                form[n] = row
+
+        else:
+            form = np.random.rand(*grn_shape)>sparsity
+        
+        if grn_shape[0] == grn_shape[1]:
+            form = form *(np.ones(form.shape)-np.identity(n_genes))
+        form = form.astype(bool)
+        # check if all genes are involved
+        for n in range(n_genes):
+            while np.sum(np.append(form[n], form[:,n])) == 0:
+                form[:,n] = np.random.rand(n_genes)>sparsity
+                form[n] = np.random.rand(n_genes)>sparsity
+                form[n,n] = 0
+
+
+        if np.sum(form) % 2 == 0:
+            success = True
+        else:
+            if verbose:
+                print("GRN connectivities not multiple of 2")
+            success=False
+            continue
+        form_sparsity = np.sum(form==0).sum()/np.prod(form.shape)
+        if np.abs(form_sparsity-sparsity) > 0.05:
+            if verbose:
+                print(f"GRN sparsity {form_sparsity} too high, resampling!")
+            success=False
+            continue
+        n = np.sum(form).astype(int)
+        # fill the connections with samples from the bimodal dist.
+        sampled1 = np.random.normal(loc=loc1, scale=std1, size=n//2)
+        sampled2 = np.random.normal(loc=loc2, scale=std2, size=n//2)
+        sampled = np.append(sampled1, sampled2)
+
+        np.random.shuffle(sampled)
+        values = np.zeros(grn_shape)
+        values[form] = np.absolute(sampled)
+        success = True
+        
+        if eigenvalues:
+            #check if the eigenvalues of B are >0
+            B = np.identity(values.shape[0])-values
+            eig_values = np.linalg.eigvals(B)
+            print(f"Eigenvalues of B:\n{eig_values}")
+            if not (eig_values>0).all():
+                if verbose:
+                    print("Eigenvalues not >0. Repeating...")
+                success = False
+
+    
+    new_grn_sparsity = np.sum(values==0).sum()/np.prod(values.shape)
+    print("GRN sparsity: ",new_grn_sparsity)
+
+    if verbose:
+        generation_kwargs = {
+            "loc1":loc1, 
+            "std1":std1, 
+            "loc2":loc2, 
+            "std2":std2,
+            "sparsity": sparsity,
+            "n_genes":n_genes,
+        }
+        fig = plot_comparison(values, standard_grn, dist = generation_kwargs)
+        fig.savefig(out_path/f"{grn_shape[0]}gene{grn_shape[1]}tfGRN.pdf")
+        fig.show()
+
+        np.savetxt(out_path/f"{grn_shape[0]}gene{grn_shape[1]}tfGRN.csv", values, delimiter=",")
+
+        if sample_connections:
+            generation_kwargs["connectivity_dist"]=(val.tolist(), counts.tolist())
+        with open(out_path/"generation_kwargs.json", "w") as wf:
+            json.dump(generation_kwargs, fp=wf)
+
+    return values

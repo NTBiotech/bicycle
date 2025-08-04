@@ -19,6 +19,7 @@ def plot_training_results(
     callback=True,
     labels=None,
 ):
+    """Generates plots of training results for the bicycle model."""
     fig, ax = plt.subplots(3, 2, figsize=(14, 16))
     df_plot = pd.DataFrame(trainer.logger.history).reset_index(drop=True)
     df_plot["epoch"] = df_plot.index
@@ -267,3 +268,34 @@ def plot_style(minimal=True):
         plt.rcParams["axes.linewidth"] = 0.8
         plt.rcParams["legend.handlelength"] = 2
         plt.rcParams["figure.titlesize"] = MEDIUM_SIZE
+
+
+def plot_comparison(grn1:np.ndarray, grn2=None, dist:dict=None):
+    from scipy.stats.distributions import norm
+
+    """Plot comparison of grns with hist and model bimodal distribution."""
+    plt.clf()
+    plt.rcParams["figure.figsize"] = (10, 10)
+    if not grn2 is None:
+        plt.subplot(1,4,1)
+        plt.imshow(grn2)
+        plt.title("Standard grn")
+    plt.subplot(1,4,4)
+    plt.imshow(grn1)
+    plt.title("Modeled grn")
+    plt.subplot(1,4,(2,3))
+    plt.hist(grn1[grn1!=0].flatten(), bins=20, color="green", density=True, alpha = 0.6, label="Modeled distribution")
+    if not grn2 is None:
+        plt.hist(grn2[grn2!=0].flatten(), bins=20, color="red", density=True, alpha = 0.3, label="Original grn")
+    xmin, xmax = plt.xlim()
+    x = np.linspace(xmin, xmax, 200)
+    if not dist is None:
+        pdf1 = norm.pdf(x, dist["loc1"], dist["std1"])
+        pdf2 = norm.pdf(x, dist["loc2"], dist["std2"])
+        plt.plot(x, pdf1/2, label=f"pdf1 with\nloc:{dist['loc1']}\nstd:{dist['std1']}", color = "orange", linewidth = 2)
+        plt.plot(x, pdf2/2, label=f"pdf2 with\nloc:{dist['loc2']}\nstd:{dist['std2']}", color = "blue", linewidth = 2)
+    plt.ylabel("Density")
+    plt.xlabel("Interaction capacity")
+    plt.legend()
+    plt.tight_layout()
+    return plt.gcf()
